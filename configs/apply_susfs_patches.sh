@@ -103,7 +103,12 @@ fix_sukisu_init_c() {
 
   echo "Fixing SukiSU init compatibility in: $target"
 
-  sed -i '/ksu_lsm_hook_init[[:space:]]*();/d' "$target" || true
+  # Current SukiSU LSM-hook layouts do not expose the legacy init/exit pair.
+  # SUSFS patch hunks may leave the exit call behind even when init was removed.
+  sed -i \
+    -e '/ksu_lsm_hook_init[[:space:]]*();/d' \
+    -e '/ksu_lsm_hook_exit[[:space:]]*();/d' \
+    "$target" || true
 
   sed -i \
 -e 's/\bksu_syscall_hook_manager_init[[:space:]]*(/ksu_syscall_hook_init(/g' \
@@ -653,6 +658,54 @@ fix_sukisu_forced_execveat_link_symbols() {
   local ksud_integration_c="$base/runtime/ksud_integration.c"
 
   echo "Force-fixing SukiSU execveat/link symbols in: $base"
+  # Reconcile the upstream SUSFS execve-handler API hunk with SukiSU's own API.
+  # SukiSU uses (const char *path, struct user_arg_ptr *argv); the upstream
+  # KernelSU declaration uses fd/filename/argv/envp/flags and is not compatible.
+  python3 - "$base" <<'PYKSUD'
+from pathlib import Path
+import re
+import sys
+
+base = Path(sys.argv[1])
+c = base / "runtime/ksud_integration.c"
+h = base / "runtime/ksud.h"
+if c.is_file():
+    source = c.read_text()
+    custom = re.search(
+        r'\bvoid\s+ksu_handle_execveat_ksud\s*\(\s*const\s+char\s*\*\s*path\s*,\s*struct\s+user_arg_ptr\s*\*\s*argv\s*\)',
+        source,
+    )
+    if custom:
+        # This stop-hook belongs to the upstream API migration and is absent
+        # from this SukiSU tree; keeping the call creates an implicit declaration.
+        source = re.sub(r'^[ \t]*ksu_stop_ksud_execve_hook\(\);[ \t]*\n', '', source, flags=re.M)
+        c.write_text(source)
+        # The SUSFS patch can also replace the SukiSU two-argument call in
+        # feature/sucompat.c with the upstream five-argument API. Restore the
+        # SukiSU call shape and derive the path from struct filename.
+        sucompat = base / "feature/sucompat.c"
+        if sucompat.is_file():
+            compat_source = sucompat.read_text()
+            compat_source, call_count = re.subn(
+                r'\(void\)\s*ksu_handle_execveat_ksud\s*\(\s*fd\s*,\s*filename_ptr\s*,\s*argv\s*,\s*envp\s*,\s*flags\s*\)\s*;',
+                '(void)ksu_handle_execveat_ksud((filename_ptr && *filename_ptr) ? (*filename_ptr)->name : NULL, argv);',
+                compat_source,
+            )
+            if call_count:
+                sucompat.write_text(compat_source)
+                print(f"Restored {call_count} SukiSU execveat call(s) in feature/sucompat.c")
+        if h.is_file():
+            header = h.read_text()
+            proto = "void ksu_handle_execveat_ksud(const char *path, struct user_arg_ptr *argv);"
+            pattern = r'\bint\s+ksu_handle_execveat_ksud\s*\([^;]*\);'
+            if re.search(pattern, header, flags=re.S):
+                header = re.sub(pattern, proto, header, count=1, flags=re.S)
+            elif not re.search(r'\bvoid\s+ksu_handle_execveat_ksud\s*\(', header):
+                header = header.rstrip() + "\n\n" + proto + "\n"
+            h.write_text(header)
+            print("Aligned ksud.h with the existing SukiSU execve handler API")
+        print("Removed the incompatible upstream-only ksud stop-hook call")
+PYKSUD
   # Hard fallback: fix wrong ksu_handle_execveat_init stub signature in ksud_integration.c.
   # Some compatibility paths accidentally create:
   #   void ksu_handle_execveat_init(void)
@@ -1021,8 +1074,16 @@ if [ -f "$kbuild" ]; then
   if [ -f "$(dirname "$kbuild")/hook/arm64/patch_memory.c" ] && ! grep -q 'hook/arm64/patch_memory\.o' "$kbuild"; then
     echo 'kernelsu-objs += hook/arm64/patch_memory.o' >> "$kbuild"
   fi
-  if [ "${ANDROID_VER_LOCAL:-}" = "android14" ] && [ "${KERNEL_VER_LOCAL:-}" = "6.1" ] && [ -f "$(dirname "$kbuild")/hook/lsm_hook.c" ] && ! grep -q 'hook/lsm_hook\.o' "$kbuild"; then
+  # SUSFS 10_enable_susfs_for_ksu.patch can remove this object even though
+  # SELinux Hide still calls ksu_lsm_hook()/ksu_lsm_unhook(). Keep it linked on
+  # every supported kernel version whenever this source implements both APIs.
+  lsm_src="$(dirname "$kbuild")/hook/lsm_hook.c"
+  if [ -f "$lsm_src" ] && \
+     grep -qE '^[[:space:]]*(int|void)[[:space:]]+ksu_lsm_hook[[:space:]]*\(' "$lsm_src" && \
+     grep -qE '^[[:space:]]*(int|void)[[:space:]]+ksu_lsm_unhook[[:space:]]*\(' "$lsm_src" && \
+     ! grep -q 'hook/lsm_hook\.o' "$kbuild"; then
     echo 'kernelsu-objs += hook/lsm_hook.o' >> "$kbuild"
+    echo "Restored hook/lsm_hook.o in $kbuild for SELinux Hide linkage"
   fi
 fi
   done
@@ -1234,13 +1295,22 @@ echo "Applying SukiSU compatibility fixes..."
 sed -i '/DEFINE_MEMBER(netlink_kernel_cfg, cb_mutex)/d' drivers/kernelsu/kpm/super_access.c 2>/dev/null || true
 
 if [ -f drivers/kernelsu/hook/lsm_hook.c ]; then
-  sed -i \
-'s/security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), "ksu");/security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), \&ksu_lsmid);/' \
-drivers/kernelsu/hook/lsm_hook.c || true
-
-  grep -q "static struct lsm_id ksu_lsmid" drivers/kernelsu/hook/lsm_hook.c || \
-sed -i '/security_add_hooks.*ksu_lsmid/i\    static struct lsm_id ksu_lsmid = { .name = "ksu", .id = LSM_ID_UNDEF };' \
-drivers/kernelsu/hook/lsm_hook.c || true
+  if [ "${ANDROID_VER_LOCAL:-}" = "android14" ] && [ "${KERNEL_VER_LOCAL:-}" = "6.1" ]; then
+    # Android 14 / 6.1 uses the lsm_id-based security_add_hooks() API.
+    sed -i \
+      's/security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), "ksu");/security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), \&ksu_lsmid);/' \
+      drivers/kernelsu/hook/lsm_hook.c || true
+    grep -q "static struct lsm_id ksu_lsmid" drivers/kernelsu/hook/lsm_hook.c || \
+      sed -i '/security_add_hooks.*ksu_lsmid/i\    static struct lsm_id ksu_lsmid = { .name = "ksu", .id = LSM_ID_UNDEF };' \
+      drivers/kernelsu/hook/lsm_hook.c || true
+  else
+    # Android 13 / 5.15 uses the legacy string-based security_add_hooks() API.
+    sed -i \
+      's/security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), \&ksu_lsmid);/security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), "ksu");/' \
+      drivers/kernelsu/hook/lsm_hook.c || true
+    sed -i '/^[[:space:]]*static struct lsm_id ksu_lsmid[[:space:]]*=/d' \
+      drivers/kernelsu/hook/lsm_hook.c || true
+  fi
 fi
 
 
@@ -1930,6 +2000,65 @@ if [ -n "$_KSU_KCONFIG" ]; then
 else
   echo "::warning::Could not locate KSU Kconfig to verify SUSFS defconfig options"
 fi
+
+# Finalize execveat init symbol ownership after all compatibility rewrites.
+# SukiSU/SUSFS variants may define this in sucompat.c or ksud_integration.c,
+# but never in both. Remove duplicate bodies before the linker sees the objects.
+python3 - <<'PYEXECVEAT_SYMBOLS'
+from pathlib import Path
+import re
+
+roots = [Path("kernel"), Path("drivers/kernelsu")]
+name = "ksu_handle_execveat_init"
+
+def function_definitions(text, symbol):
+    pat = re.compile(r'(?m)^[ \t]*(?:static[ \t]+)?int[ \t]+' + re.escape(symbol) + r'[ \t]*\([^;{}]*\)[ \t\n]*\{')
+    found = []
+    for m in pat.finditer(text):
+        brace = text.find("{", m.start(), m.end())
+        depth = 0
+        end = None
+        for i in range(brace, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end is not None:
+            found.append((m.start(), end))
+    return found
+
+for root in roots:
+    if not root.is_dir():
+        continue
+    compat = root / "feature/sucompat.c"
+    integration = root / "runtime/ksud_integration.c"
+    if not integration.is_file():
+        continue
+    itext = integration.read_text()
+    idefs = function_definitions(itext, name)
+    cdefs = function_definitions(compat.read_text(), name) if compat.is_file() else []
+
+    if cdefs:
+        for start, end in reversed(idefs):
+            itext = itext[:start] + itext[end:]
+        if idefs:
+            integration.write_text(itext)
+            print(f"Removed {len(idefs)} duplicate {name} definition(s) from {integration}; sucompat.c owns the symbol")
+    elif len(idefs) > 1:
+        # Keep one implementation in ksud_integration.c and remove extra bodies.
+        for start, end in reversed(idefs[1:]):
+            itext = itext[:start] + itext[end:]
+        integration.write_text(itext)
+        print(f"Removed {len(idefs)-1} duplicate {name} definition(s) from {integration}")
+
+    final_idefs = function_definitions(integration.read_text(), name)
+    final_cdefs = function_definitions(compat.read_text(), name) if compat.is_file() else []
+    if len(final_idefs) + len(final_cdefs) > 1:
+        raise SystemExit(f"Duplicate {name} definitions remain under {root}: sucompat={len(final_cdefs)}, ksud_integration={len(final_idefs)}")
+PYEXECVEAT_SYMBOLS
 
 echo "✅ SUSFS patches applied successfully"
 echo "::endgroup::"
