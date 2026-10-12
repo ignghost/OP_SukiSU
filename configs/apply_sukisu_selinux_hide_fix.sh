@@ -5,7 +5,11 @@ set -euo pipefail
 : "${COMMON_KERNEL_FOLDER:?COMMON_KERNEL_FOLDER is required}"
 : "${ANDROID_VER_LOCAL:?ANDROID_VER_LOCAL is required}"
 : "${KERNEL_VER_LOCAL:?KERNEL_VER_LOCAL is required}"
-# SELinux-hide is enabled for supported SukiSU layouts across the workflow. The implementation below validates required files/API before modifying the tree.
+
+if [[ "$ANDROID_VER_LOCAL" != "android14" || "$KERNEL_VER_LOCAL" != "6.1" ]]; then
+  exit 0
+fi
+
 ensure_backup_sepolicy_api() {
   local root="$1"
   local header="$root/selinux/sepolicy.h"
@@ -147,71 +151,8 @@ PY
 ensure_backup_sepolicy_api "$KSU_FOLDER/kernel"
 ensure_backup_sepolicy_api "$COMMON_KERNEL_FOLDER/drivers/kernelsu"
 
-# The SUSFS enable patch is generated against a newer SukiSU revision than the
-# pinned source. On the OP13R Android 14 / 6.1 tree, its SELinux-hide hunks can
-# reject while the patch driver removes the .rej files and continues. That leaves
-# symbols referenced by SELinux core with file-local (static) definitions. Repair
-# only those known cross-translation-unit definitions, then verify each one.
-repair_selinux_hide_linkage() {
-  local root="$1"
-  python3 - "$root" <<'PYLINK'
-from pathlib import Path
-import re, sys
-root = Path(sys.argv[1])
-ksu = root / "drivers/kernelsu/feature/selinux_hide.c"
-selinuxfs = root / "security/selinux/selinuxfs.c"
-for path in (ksu, selinuxfs):
-    if not path.is_file():
-        raise SystemExit(f"::error::Required SELinux Hide source missing: {path}")
-
-# These symbols are defined by SukiSU's feature/selinux_hide.c. The SUSFS
-# compatibility patch may reject the hunk that removes static linkage, so repair
-# the definitions in their owning translation unit rather than duplicating them
-# in selinuxfs.c.
-s = ksu.read_text()
-for pat, repl in [
-    (r'(?m)^([\t ]*)static[\t ]+bool[\t ]+ksu_selinux_hide_enabled\b', r'\1bool ksu_selinux_hide_enabled'),
-    (r'(?m)^([\t ]*)static[\t ]+bool[\t ]+ksu_selinux_hide_running\b', r'\1bool ksu_selinux_hide_running'),
-    (r'(?m)^([\t ]*)static[\t ]+struct[\t ]+selinux_state[\t ]+fake_state[\t ]*;', r'\1struct selinux_state fake_state;'),
-    (r'(?m)^([\t ]*)static[\t ]+(DEFINE_STATIC_KEY_FALSE[\t ]*\([\t ]*fake_status_initialize_key[\t ]*\)[\t ]*;)', r'\1\2'),
-    (r'(?m)^([\t ]*)static[\t ]+(struct[\t ]+page[\t ]*\*[\t ]*fake_status[\t ]*=)', r'\1\2'),
-    (r'(?m)^([\t ]*)static[\t ]+void[\t ]+initialize_fake_status[\t ]*\(', r'\1void initialize_fake_status('),
-]:
-    s = re.sub(pat, repl, s)
-ksu.write_text(s)
-
-# Confirm selinuxfs still contains the consumer side; do not add duplicate
-# definitions or invent a replacement function body there.
-fs = selinuxfs.read_text()
-for symbol in ("fake_status_initialize_key", "fake_status", "initialize_fake_status"):
-    if symbol not in fs:
-        raise SystemExit(f"::error::SELinux Hide consumer symbol {symbol} missing from {selinuxfs}")
-
-print(f"Fixed SELinux Hide cross-file linkage: {ksu.relative_to(root)}")
-print(f"Validated SELinux Hide consumers: {selinuxfs.relative_to(root)}")
-
-checks = {
-    ksu: [
-        r'(?m)^[\t ]*bool[\t ]+ksu_selinux_hide_enabled\b',
-        r'(?m)^[\t ]*bool[\t ]+ksu_selinux_hide_running\b',
-        r'(?m)^[\t ]*struct[\t ]+selinux_state[\t ]+fake_state[\t ]*;',
-        r'(?m)^[\t ]*DEFINE_STATIC_KEY_FALSE[\t ]*\([\t ]*fake_status_initialize_key[\t ]*\)[\t ]*;',
-        r'(?m)^[\t ]*struct[\t ]+page[\t ]*\*[\t ]*fake_status[\t ]*=',
-        r'(?m)^[\t ]*void[\t ]+initialize_fake_status[\t ]*\(',
-    ],
-}
-for path, patterns in checks.items():
-    content = path.read_text()
-    for pattern in patterns:
-        if not re.search(pattern, content):
-            raise SystemExit(f"::error::SELinux Hide global definition missing after repair: {path} / {pattern}")
-print("SELinux Hide cross-file symbol definitions validated")
-PYLINK
-}
-
 patch_lsm_hook "$KSU_FOLDER/kernel/hook/lsm_hook.c"
 patch_lsm_hook "$COMMON_KERNEL_FOLDER/drivers/kernelsu/hook/lsm_hook.c"
-repair_selinux_hide_linkage "$COMMON_KERNEL_FOLDER"
 
 COMMON_HIDE="$COMMON_KERNEL_FOLDER/drivers/kernelsu/feature/selinux_hide.c"
 COMMON_LSM="$COMMON_KERNEL_FOLDER/drivers/kernelsu/hook/lsm_hook.c"
@@ -230,4 +171,3 @@ grep -q 'ksu_lsm_hook_target_matches(current_origin, target)' "$COMMON_LSM"
 echo "SukiSU SELinux-hide API is internally consistent"
 echo "  backup_sepolicy: declaration + definition verified"
 echo "  common-tree LSM matcher: verified"
-echo "  SELinux Hide cross-file linkage: verified"
