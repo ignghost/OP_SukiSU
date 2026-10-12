@@ -1074,6 +1074,38 @@ cd "$KSU_FOLDER"
 
 patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
 
+# The latest upstream SUSFS enable-patch carries an upstream KernelSU execve-handler
+# migration in ksud_integration.c. SukiSU maintains its own handler API, so that one
+# hunk can legitimately reject even when the existing SukiSU implementation already
+# performs the init-second-stage and first-Zygote work. Accept only that exact case;
+# all other rejects remain fatal.
+resolve_sukisu_ksud_api_reject() {
+  local rej="$1"
+  local target="${rej%.rej}"
+
+  [ -f "$rej" ] || return 0
+  case "$target" in
+    kernel/runtime/ksud_integration.c) ;;
+    *) return 0 ;;
+  esac
+
+  if grep -qE '^[[:space:]]*void[[:space:]]+ksu_handle_execveat_ksud[[:space:]]*\([[:space:]]*const char[[:space:]]*\*[[:space:]]*path' "$target" \
+     && grep -q 'ksu_selinux_hide_handle_second_stage();' "$target" \
+     && grep -q 'apply_kernelsu_rules();' "$target" \
+     && grep -q 'on_post_fs_data();' "$target" \
+     && grep -q 'ksu_stop_ksud_execve_hook();' "$target" \
+     && grep -q 'ksu_handle_execveat_ksud(int \*fd' "$rej"; then
+    echo "Keeping SukiSU's existing execve-handler API; skipping upstream-only SUSFS hunk: $rej"
+    rm -f "$rej"
+    return 0
+  fi
+
+  echo "::error::Cannot safely reconcile SUSFS ksud integration reject: $rej"
+  echo "The source does not match the known SukiSU handler variant; refusing to discard the reject."
+  cat "$rej"
+  exit 1
+}
+
 EXPECTED_SUKISU_REJECTS=(
   "kernel/core/init.c.rej"
   "kernel/feature/selinux_hide.c.rej"
@@ -1084,6 +1116,8 @@ EXPECTED_SUKISU_REJECTS=(
   "kernel/feature/sucompat.c.rej"
   "kernel/feature/sucompat.h.rej"
 )
+
+resolve_sukisu_ksud_api_reject "kernel/runtime/ksud_integration.c.rej"
 
 if [ -n "$(find . -name '*.rej' -print -quit)" ]; then
   echo "KernelSU patch produced reject files:"
