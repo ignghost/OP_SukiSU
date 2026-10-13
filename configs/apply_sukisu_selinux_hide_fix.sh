@@ -171,34 +171,57 @@ if body:
     print("SELinux policy-specific context helper implementation exists; leaving hooks.c unchanged")
 else:
     standard = "security_context_to_sid"
-    if not re.search(r'\b' + standard + r'\s*\(', s) and (not header.is_file() or not re.search(r'\b' + standard + r'\s*\(', header.read_text())):
+    header_text = header.read_text() if header.is_file() else ""
+    if not re.search(r'\b' + standard + r'\s*\(', s + header_text):
         raise SystemExit(f"::error::Neither {helper} nor standard {standard} API was found; refusing to invent an implementation")
-    pattern = re.compile(r'\b' + helper + r'\s*\(\s*([^,()]+)\s*,')
-    h2, count = pattern.subn(standard + '(', h)
-    if count == 0:
-        if helper in h:
-            raise SystemExit(f"::error::Found {helper} in {hooks}, but its call form is not safely recognizable")
-        print("No policy-specific context helper call in hooks.c; nothing to adapt")
-    else:
-        # The Android 16 / 6.12 current-policy API takes four arguments:
-        # (scontext, scontext_len, out_sid, gfp). The old policy-specific call
-        # also supplied a policy argument and SECSID_NULL; remove both extras.
-        h2, null_count = re.subn(
-            r'(\b' + standard + r'\s*\(\s*[^,()]+\s*,\s*[^,()]+\s*,\s*[^,()]+\s*,\s*)SECSID_NULL\s*,\s*',
-            r'\1', h2, count=1
-        )
-        # Remove an injected prototype that conflicts with security.h's actual
-        # four-argument declaration. Keep the canonical declaration in security.h.
-        h2, decl_count = re.subn(
-            r'(?m)^\s*extern\s+int\s+' + standard + r'\s*\([^;]*\);\s*\n?',
-            '', h2
-        )
+
+    # Convert only actual six-argument calls. The policy and default SID
+    # arguments do not exist in the current-policy API (4 arguments).
+    call_pattern = re.compile(r'\b' + helper + r'\s*\(([^()]*)\)')
+    converted = [0]
+    def split_args(raw):
+        parts, begin, depth = [], 0, 0
+        for i, ch in enumerate(raw):
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+            elif ch == ',' and depth == 0:
+                parts.append(raw[begin:i].strip())
+                begin = i + 1
+        parts.append(raw[begin:].strip())
+        return parts
+    def replace_call(match):
+        line_start = h.rfind('\n', 0, match.start()) + 1
+        prefix = h[line_start:match.start()]
+        # Leave prototypes/declarations untouched; only rewrite calls.
+        if re.search(r'\b(?:extern|static)\s+(?:int|void)\s*$', prefix):
+            return match.group(0)
+        args = split_args(match.group(1))
+        if len(args) != 6:
+            return match.group(0)
+        converted[0] += 1
+        return standard + '(' + ', '.join((args[1], args[2], args[3], args[5])) + ')'
+    h2 = call_pattern.sub(replace_call, h)
+
+    # Repair a partially adapted call left by older versions of this script.
+    # security_context_to_sid() in this tree takes (context, length, sid, gfp).
+    bad_call = re.compile(r'\bsecurity_context_to_sid\s*\(\s*([^,()]+)\s*,\s*([^,()]+)\s*,\s*([^,()]+)\s*,\s*(?:SECSID_NULL|(?:0|SECINITSID_UNLABELED))\s*,\s*(GFP_[A-Z_]+)\s*\)')
+    h2, repaired = bad_call.subn(r'security_context_to_sid(\1, \2, \3, \4)', h2)
+
+    # Older regex-based versions could accidentally rename the helper's
+    # extern prototype to the incompatible five-argument standard API.
+    bad_proto = re.compile(r'(?ms)^[ \t]*extern[ \t]+int[ \t]+security_context_to_sid[ \t]*\([^;]*\b(?:default_sid|SECSID_NULL)\b[^;]*\);[ \t]*\n?')
+    h2, removed_proto = bad_proto.subn('', h2)
+    helper_proto = re.compile(r'(?ms)^[ \t]*extern[ \t]+int[ \t]+' + helper + r'[ \t]*\([^;]*\);[ \t]*\n?')
+    h2, removed_helper_proto = helper_proto.subn('', h2)
+    if converted[0] or repaired or removed_proto or removed_helper_proto:
         hooks.write_text(h2)
-        print(f"Adapted {count} SELinux context conversion call(s) in {hooks.relative_to(root)} to the current-policy API")
-        if null_count:
-            print("Removed the obsolete SECSID_NULL argument for the four-argument Android 16 API")
-        if decl_count:
-            print(f"Removed {decl_count} conflicting extern prototype(s); using security.h declaration")
+        print(f"Adapted {converted[0]} policy-specific call(s); repaired {repaired} stale call(s); removed {removed_proto} conflicting standard prototype(s) and {removed_helper_proto} obsolete helper prototype(s) in {hooks.relative_to(root)}")
+    elif re.search(r'\b' + helper + r'\s*\([^;]*\)\s*(?!;)', h2):
+        raise SystemExit(f"::error::Found an unadapted {helper} call in {hooks}")
+    else:
+        print("No policy-specific context helper call in hooks.c; nothing to adapt")
 PYPOLICY
 }
 
@@ -235,6 +258,116 @@ for pat, repl in [
     s = re.sub(pat, repl, s)
 ksu.write_text(s)
 
+# The hide implementation from newer SukiSU revisions may call policy-specific
+# helpers that do not exist in older Android SELinux trees. If a helper is absent,
+# adapt only its recognized selinuxfs.c call sites to the equivalent current-policy
+# API, provided that API exists in this source tree. Do not fail merely because an
+# unused compatibility helper is absent.
+services = root / "security/selinux/ss/services.c"
+header = root / "security/selinux/include/security.h"
+if not services.is_file():
+    raise SystemExit(f"::error::Required SELinux policy helper source missing: {services}")
+sv = services.read_text()
+fs = selinuxfs.read_text()
+hdr = header.read_text() if header.is_file() else ""
+
+def api_exists(name):
+    return bool(re.search(r"\b" + re.escape(name) + r"\s*\(", sv) or
+                re.search(r"\b" + re.escape(name) + r"\s*\(", hdr))
+
+def split_args(raw):
+    parts, begin, depth = [], 0, 0
+    for i, ch in enumerate(raw):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(raw[begin:i].strip())
+            begin = i + 1
+    parts.append(raw[begin:].strip())
+    return parts
+
+def replace_policy_call_args(source, old, new):
+    # Convert complete calls, preserving balanced parentheses. The policy
+    # parameter is removed from all three APIs; context-to-SID also drops the
+    # obsolete default-SID argument because current API takes four arguments.
+    token = re.compile(r"\b" + re.escape(old) + r"\s*\(")
+    out = []
+    pos = 0
+    count = 0
+    while True:
+        match = token.search(source, pos)
+        if not match:
+            out.append(source[pos:])
+            break
+        out.append(source[pos:match.start()])
+        open_paren = source.find("(", match.start(), match.end())
+        depth = 1
+        i = open_paren + 1
+        while i < len(source) and depth:
+            ch = source[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            out.append(source[match.start():match.end()])
+            pos = match.end()
+            continue
+        args = split_args(source[open_paren + 1:i - 1])
+        # Do not rewrite prototypes, malformed calls, or unexpected signatures.
+        line_start = source.rfind("\n", 0, match.start()) + 1
+        prefix = source[line_start:match.start()]
+        if re.search(r"\b(?:extern|static)\s+(?:int|void)\s*$", prefix):
+            out.append(source[match.start():i])
+            pos = i
+            continue
+        if old == "security_context_to_sid_with_policy" and len(args) == 6:
+            args = [args[1], args[2], args[3], args[5]]
+        elif old in ("security_sid_to_context_with_policy", "security_compute_av_user_with_policy") and len(args) in (4, 5):
+            args = args[1:]
+        else:
+            out.append(source[match.start():i])
+            pos = i
+            continue
+        out.append(new + "(" + ", ".join(args) + ")")
+        count += 1
+        pos = i
+    return "".join(out), count
+
+policy_helpers = (
+    ("security_context_to_sid_with_policy", "security_context_to_sid"),
+    ("security_sid_to_context_with_policy", "security_sid_to_context"),
+    ("security_compute_av_user_with_policy", "security_compute_av_user"),
+)
+for old, current_api in policy_helpers:
+    definition = re.search(r"\b" + re.escape(old) + r"\s*\([^;{}]*\)\s*\{", sv, re.S)
+    if definition:
+        line_start = sv.rfind("\n", 0, definition.start()) + 1
+        line_end = sv.find("\n", definition.start())
+        if line_end < 0:
+            line_end = len(sv)
+        first_line = sv[line_start:line_end]
+        if re.match(r"^[\t ]*static\b", first_line):
+            sv = sv[:line_start] + re.sub(r"^([\t ]*)static[\t ]+", r"\1", first_line, count=1) + sv[line_end:]
+            print(f"Removed file-local static linkage from {old} in {services.relative_to(root)}")
+        continue
+
+    if re.search(r"\b" + re.escape(old) + r"\s*\(", fs):
+        if not api_exists(current_api):
+            raise SystemExit(f"::error::SELinux helper {old} is absent and compatible API {current_api} was not found; refusing unsafe rewrite")
+        fs2, count = replace_policy_call_args(fs, old, current_api)
+        if count == 0:
+            raise SystemExit(f"::error::Found {old} consumer in {selinuxfs}, but could not safely adapt its arguments")
+        fs = fs2
+        print(f"Adapted {count} selinuxfs.c call(s): {old} -> {current_api}")
+    else:
+        print(f"SELinux helper {old} is absent but unused in selinuxfs.c; no compatibility change needed")
+
+selinuxfs.write_text(fs)
+services.write_text(sv)
 # Validate only consumers that actually exist in this kernel revision.
 # Newer OnePlus/Android 16 trees may not use selinuxfs.c for the fake-status
 # implementation; requiring every legacy identifier in that file rejects a
