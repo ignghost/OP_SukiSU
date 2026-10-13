@@ -62,13 +62,13 @@ on:
         options: [Enable, Disable]
         default: Enable
       nomount_override:
-        description: 'NoMount (All Devices)'
+        description: 'NoMount Implementation'
         required: true
         type: choice
         options: [Enable, Disable]
         default: Enable
       selinux_hide_override:
-        description: 'SukiSU SELinux Hide Implementation (OP13R)'
+        description: 'SELinux Hide Implementation (Enable For Build Success)'
         required: true
         type: choice
         options: [Enable, Disable]
@@ -523,14 +523,12 @@ jobs:
             echo "| ⚙️ Optimization | \`${{ inputs.optimize_level }}\` |"
             echo "| 🧩 KPM Support | **${{ inputs.kpm_override }}** |"
             echo "| 🧩 Droidspaces + NTSync + Unicode + IP SET/IPv6_NAT | **${{ inputs.misc_features_override }}** |"
-            echo "| 🧱 NoMount (All Devices) | **${{ inputs.nomount_override }}** |"
-            echo "| 🛡️ SukiSU SELinux Hide (OP13R) | **${{ inputs.selinux_hide_override }}** |"
             echo "| 🧹 Clean build (no ccache) | ${{ inputs.clean_build && '✅' || '❌' }} |"
             echo "| 📦 Create release | ${{ inputs.make_release && '✅' || '❌' }} |"
             echo "| 🔄 Toolchain sync | ${{ (inputs.mirror_toolchains || inputs.make_release) && '✅' || '❌' }}${{ (!inputs.mirror_toolchains && inputs.make_release) && ' · auto for release' || '' }} |"
             echo "| 🧰 ADIOS · Debug artifacts | ${{ inputs.enable_adios && '✅' || '❌' }} · ${{ inputs.debug && '✅' || '❌' }} |"
-            echo "| 🧱 NoMount | ✅ Android 14 / Linux 6.1 only |"
-            echo "| 🛡️ SELinux Modification Hide | ✅ Fix successfully applied · Android 14 / Linux 6.1 only |"
+            echo "| 🧱 NoMount | "
+            echo "| 🛡️ SELinux Modification Hide | "
             echo "| 🚀 BBR + BBRv3 + BBG | **${{ inputs.bbr_features_override }}** |"
             echo ""
             echo "### 🎛️ Feature Override Guide"
