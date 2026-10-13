@@ -54,7 +54,7 @@ on:
         required: true
         type: choice
         options: [Enable, Disable]
-        default: Enable
+        default: Disable
       misc_features_override:
         description: 'Droidspaces + NTSync + Unicode Fix + IP SET & IPv6_NAT Support'
         required: true
