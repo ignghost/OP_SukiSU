@@ -2,7 +2,19 @@
 set -euo pipefail
 
 COMMON_KERNEL_FOLDER="${COMMON_KERNEL_FOLDER:?COMMON_KERNEL_FOLDER is not set}"
-NOMOUNT_COMMIT="${NOMOUNT_COMMIT:-c7f63e3feb4125d591b6969a33aac04feb40f8ba}"
+NOMOUNT_REPO="https://github.com/maxsteeel/nomount.git"
+
+if [[ -z "${NOMOUNT_COMMIT:-}" ]]; then
+  echo "Resolving latest NoMount commit from upstream..."
+  NOMOUNT_COMMIT="$(git ls-remote "$NOMOUNT_REPO" HEAD | awk 'NR == 1 {print $1}')"
+  if [[ ! "$NOMOUNT_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "::error::NoMount: failed to resolve latest upstream commit"
+    exit 1
+  fi
+else
+  echo "Using requested NoMount commit override: $NOMOUNT_COMMIT"
+fi
+
 SETUP_URL="https://raw.githubusercontent.com/maxsteeel/nomount/${NOMOUNT_COMMIT}/kernel/setup.sh"
 SETUP_SCRIPT="${RUNNER_TEMP:-/tmp}/nomount-setup-${NOMOUNT_COMMIT}.sh"
 DEFCONFIG="$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig"
