@@ -1064,7 +1064,7 @@ runs:
 
         echo "SUSFS_PATCH_APPLIED=true" >> "$GITHUB_ENV"
 
-    - name: Apply SELinux Hide Modification Script
+    - name: Apply SELinux Modification Hide Script
       shell: bash
       if: ${{ inputs.ksu_type == 'SUKISU' && env.OP_SELINUX_HIDE == 'true' }}
       env:
