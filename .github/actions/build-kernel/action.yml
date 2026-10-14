@@ -1064,7 +1064,7 @@ runs:
 
         echo "SUSFS_PATCH_APPLIED=true" >> "$GITHUB_ENV"
 
-    - name: Apply SukiSU SELinux Hide Implementation (OP13R)
+    - name: Apply SELinux Hide Modification Script
       shell: bash
       if: ${{ inputs.ksu_type == 'SUKISU' && env.OP_SELINUX_HIDE == 'true' }}
       env:
@@ -1073,15 +1073,15 @@ runs:
         KERNEL_SOURCE_ROOT: ${{ env.COMMON_KERNEL_FOLDER }}
       run: |
         set -euo pipefail
-        echo "::group::Apply SukiSU SELinux-hide implementation"
-        SCRIPT="$GITHUB_WORKSPACE/configs/apply_sukisu_selinux_hide_fix.sh"
+        echo "::group::Apply SELinux-Hide Implementation"
+        SCRIPT="$GITHUB_WORKSPACE/configs/apply_selinux_hide_fix.sh"
         TARGET="$COMMON_KERNEL_FOLDER"
-        [ -f "$SCRIPT" ] || { echo "::error::SukiSU SELinux implementation script not found: $SCRIPT"; exit 1; }
+        [ -f "$SCRIPT" ] || { echo "::error::SELinux Hide implementation script not found: $SCRIPT"; exit 1; }
         chmod +x "$SCRIPT"
         KERNEL_SOURCE_ROOT="$TARGET" bash "$SCRIPT"
         echo "::endgroup::"
 
-    - name: Apply NoMount (All Devices)
+    - name: Apply NoMount
       shell: bash
       if: ${{ env.OP_NOMOUNT == 'true' }}
       run: |
