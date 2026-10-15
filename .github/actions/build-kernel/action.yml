@@ -2229,6 +2229,25 @@ runs:
 
         echo "::endgroup::"
 
+    - name: Download latest SukiSU Manager from GitHub Actions
+      shell: bash
+      run: |
+        set -euo pipefail
+        ARTIFACT_DIR="$RUNNER_TEMP/sukisu-manager-artifact"
+        ARTIFACT_ZIP="$RUNNER_TEMP/sukisu-manager-artifact.zip"
+        mkdir -p "$ARTIFACT_DIR"
+        curl --fail --location --retry 3 --retry-delay 2 \
+          "https://nightly.link/SukiSU-Ultra/SukiSU-Ultra/workflows/build-manager/main/Manager.zip" \
+          --output "$ARTIFACT_ZIP"
+        unzip -q "$ARTIFACT_ZIP" -d "$ARTIFACT_DIR"
+        APK_PATH=$(find "$ARTIFACT_DIR" -type f -name '*.apk' ! -name '*androidTest*' | head -n 1)
+        if [ -z "$APK_PATH" ] || [ ! -s "$APK_PATH" ]; then
+          echo "::error::No APK found in the latest SukiSU Manager GitHub Actions artifact"
+          exit 1
+        fi
+        cp "$APK_PATH" "$AK3_FOLDER/SukiSU-Manager-latest.apk"
+        echo "Included SukiSU Manager APK from the latest GitHub Actions artifact: $APK_PATH"
+
     - name: Create Kernel ZIP
       id: create_zip
       shell: bash
