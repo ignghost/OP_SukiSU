@@ -266,6 +266,19 @@ fix_sukisu_ksud_integration_c() {
 
   echo "Fixing SukiSU ksud_integration compatibility in: $target"
 
+  # These hook keys are defined by the kernel-side SUSFS compatibility edits
+  # in fs/stat.c and drivers/input/input.c. ksud_integration.c uses them to
+  # disable the optional hooks, so it must declare them explicitly.
+  if grep -q 'ksu_is_init_rc_hook_enabled' "$target" || grep -q 'ksu_is_input_hook_enabled' "$target"; then
+    grep -q '#include <linux/jump_label.h>' "$target" || sed -i '1i#include <linux/jump_label.h>' "$target"
+    if grep -q 'ksu_is_init_rc_hook_enabled' "$target" && ! grep -Eq 'extern[[:space:]]+struct[[:space:]]+static_key_(true|false)[[:space:]]+ksu_is_init_rc_hook_enabled' "$target"; then
+      sed -i '/#include <linux\/jump_label.h>/a extern struct static_key_false ksu_is_init_rc_hook_enabled;' "$target"
+    fi
+    if grep -q 'ksu_is_input_hook_enabled' "$target" && ! grep -Eq 'extern[[:space:]]+struct[[:space:]]+static_key_(true|false)[[:space:]]+ksu_is_input_hook_enabled' "$target"; then
+      sed -i '/#include <linux\/jump_label.h>/a extern struct static_key_false ksu_is_input_hook_enabled;' "$target"
+    fi
+  fi
+
   neutralize_ksu_late_loaded "$target"
 
   if ! grep -q 'ksu_no_custom_rc' "$target"; then
@@ -423,6 +436,49 @@ fix_sukisu_sucompat_api() {
   echo "Fixing SukiSU sucompat API in: $base"
 
   [ -f "$c" ] || { echo "ℹ️ sucompat.c not found in $base, skipping"; return 0; }
+
+  # Compatibility for SukiSU revisions where sucompat.c calls
+  # userspace_stack_buffer() but the helper definition is missing.
+  if grep -q 'userspace_stack_buffer[[:space:]]*(' "$c" && \
+     ! grep -qE '(^|[[:space:]])(static[[:space:]]+)?[^;]*userspace_stack_buffer[[:space:]]*\([^;]*\)[[:space:]]*\{' "$c"; then
+    echo "  Restoring missing userspace_stack_buffer() helper in: $c"
+    grep -q '#include <linux/uaccess.h>' "$c" || sed -i '1i#include <linux/uaccess.h>' "$c"
+    grep -q '#include <asm/processor.h>' "$c" || sed -i '1i#include <asm/processor.h>' "$c"
+    python3 - "$c" <<'PYHELPER'
+from pathlib import Path
+import re, sys
+
+p = Path(sys.argv[1])
+s = p.read_text()
+if re.search(r'(?m)^\s*(?:static\s+)?[^;\n]*\buserspace_stack_buffer\s*\([^;{}]*\)\s*\{', s):
+    raise SystemExit(0)
+
+helper = """/* SukiSU compatibility helper: copy data to the current userspace stack. */
+static void __user *userspace_stack_buffer(const void *data, size_t len)
+{
+    unsigned long sp = current_user_stack_pointer();
+    void __user *dst;
+
+    if (sp < len)
+        return NULL;
+
+    dst = (void __user *)(sp - len);
+    if (copy_to_user(dst, data, len))
+        return NULL;
+
+    return dst;
+}
+
+"""
+matches = list(re.finditer(r'(?m)^#include[^\n]*\n', s))
+if matches:
+    pos = matches[-1].end()
+    s = s[:pos] + "\n" + helper + s[pos:]
+else:
+    s = helper + s
+p.write_text(s)
+PYHELPER
+  fi
   [ -f "$h" ] || { echo "ℹ️ sucompat.h not found in $base, skipping"; return 0; }
 
   grep -q '#include <linux/jump_label.h>' "$c" || sed -i '1i#include <linux/jump_label.h>' "$c"
@@ -1088,6 +1144,44 @@ if [ -f "$kbuild" ]; then
 fi
   done
 
+  # Ensure the object that defines ksu_syscall_table is linked into the built-in
+  # KernelSU composite object. preinit.c calls this pointer on execve; merely
+  # cleaning sucompat.c references does not resolve that linker dependency.
+  python3 - "$KSU_FOLDER/kernel" "$COMMON_KERNEL_FOLDER/drivers/kernelsu" <<'PYKSUTABLE'
+from pathlib import Path
+import re
+import sys
+
+for root_arg in sys.argv[1:]:
+    root = Path(root_arg)
+    if not root.is_dir():
+        continue
+    kbuild = next((p for p in (root / "Kbuild", root / "Makefile") if p.is_file()), None)
+    if not kbuild:
+        continue
+    definitions = []
+    for source in root.rglob("*.c"):
+        try:
+            content = source.read_text(errors="ignore")
+        except OSError:
+            continue
+        # Match a storage definition, not an extern declaration or a use.
+        if re.search(r"(?m)^\s*(?!extern\b)(?:static\s+)?[\w\s*]+\bksu_syscall_table\s*(?:=[^;]*)?;", content):
+            definitions.append(source)
+    if not definitions:
+        continue
+    text = kbuild.read_text(errors="ignore")
+    for source in definitions:
+        obj = source.relative_to(root).with_suffix(".o").as_posix()
+        if re.search(r"(?m)^\s*(?:kernelsu|ksu)[-_]objs\s*\+?=.*\b" + re.escape(obj) + r"\b", text):
+            continue
+        # Keep the existing composite-object convention used by this script.
+        with kbuild.open("a") as stream:
+            stream.write("\nkernelsu-objs += " + obj + "\n")
+        text += "\nkernelsu-objs += " + obj + "\n"
+        print(f"Linked {obj} into {kbuild} (defines ksu_syscall_table)")
+PYKSUTABLE
+  
   for target in \
 "$KSU_FOLDER/kernel/core/init.c" \
 "$COMMON_KERNEL_FOLDER/drivers/kernelsu/core/init.c"; do
@@ -1122,6 +1216,59 @@ fi
 "$COMMON_KERNEL_FOLDER/drivers/kernelsu/feature/uts_spoof.c"; do
 [ -f "$target" ] && mv "$target" "$target.disabled" || true
   done
+
+  # The SUSFS patch can add static-branch references without supplying the
+  # corresponding SukiSU keys in this kernel version. Define missing keys in
+  # the built-in KernelSU init object; keep fs/input users as externs.
+  python3 - "$KSU_FOLDER/kernel" "$COMMON_KERNEL_FOLDER/drivers/kernelsu" <<'PYKSUHOOKS'
+from pathlib import Path
+import re
+import sys
+
+symbols = {
+    "ksu_is_init_rc_hook_enabled": "DEFINE_STATIC_KEY_TRUE",
+    "ksu_is_input_hook_enabled": "DEFINE_STATIC_KEY_TRUE",
+    "is_first_zygote": "DEFINE_STATIC_KEY_TRUE",
+}
+for root_arg in sys.argv[1:]:
+    root = Path(root_arg)
+    if not root.is_dir():
+        continue
+    sources = list(root.rglob("*.c"))
+    all_text = {}
+    for source in sources:
+        try:
+            all_text[source] = source.read_text(errors="ignore")
+        except OSError:
+            pass
+    missing = []
+    for symbol, macro in symbols.items():
+        defined = any(re.search(
+            r"(?m)^\s*(?:DEFINE_STATIC_KEY_(?:TRUE|FALSE)\s*\(\s*" + re.escape(symbol) +
+            r"\s*\)|(?:struct\s+static_key_(?:true|false)|bool)\s+" + re.escape(symbol) +
+            r"\s*(?:__aligned\([^)]*\))?\s*(?:=|;))", text)
+            and not re.search(r"(?m)^\s*extern\b[^;]*\b" + re.escape(symbol) + r"\s*;", text)
+            for text in all_text.values())
+        if not defined and any(re.search(r"\b" + re.escape(symbol) + r"\b", text) for text in all_text.values()):
+            missing.append((symbol, macro))
+    if not missing:
+        continue
+    target = next((p for p in (root / "core/init.c", root / "init.c") if p.is_file()), None)
+    if target is None:
+        print(f"WARNING: cannot add missing static keys; no init.c under {root}")
+        continue
+    text = target.read_text(errors="ignore")
+    if "#include <linux/jump_label.h>" not in text:
+        text = "#include <linux/jump_label.h>\n" + text
+    additions = []
+    for symbol, macro in missing:
+        if not re.search(r"(?m)^\s*(?:DEFINE_STATIC_KEY_(?:TRUE|FALSE)\s*\(\s*" + re.escape(symbol) + r"\s*\)|(?:struct\s+static_key_(?:true|false)|bool)\s+" + re.escape(symbol) + r"\s*(?:__aligned\([^)]*\))?\s*=)", text):
+            additions.append(f"{macro}({symbol});")
+    if additions:
+        text = text.rstrip() + "\n\n" + "\n".join(additions) + "\n"
+        target.write_text(text)
+        print(f"Added missing SukiSU static-key definitions to {target}: {', '.join(x[0] for x in missing)}")
+PYKSUHOOKS
 
   echo "✅ SukiSU linker-symbol compatibility cleanup completed"
 }
@@ -1418,11 +1565,11 @@ if [ -f drivers/kernelsu/runtime/ksud.c ]; then
 sed -i '1i\#include <linux/jump_label.h>\nDEFINE_STATIC_KEY_FALSE(ksu_init_rc_hook_key_false);\nDEFINE_STATIC_KEY_FALSE(ksu_input_hook_key_false);' drivers/kernelsu/runtime/ksud.c
 fi
 
-sed -i 's/extern struct static_key_true ksu_is_init_rc_hook_enabled;/DEFINE_STATIC_KEY_FALSE(ksu_is_init_rc_hook_enabled);/' fs/stat.c 2>/dev/null || true
-sed -i 's/extern struct static_key_true ksu_is_input_hook_enabled;/DEFINE_STATIC_KEY_FALSE(ksu_is_input_hook_enabled);/' drivers/input/input.c 2>/dev/null || true
+sed -i 's/DEFINE_STATIC_KEY_FALSE(ksu_is_init_rc_hook_enabled);/extern struct static_key_true ksu_is_init_rc_hook_enabled;/' fs/stat.c 2>/dev/null || true
+sed -i 's/DEFINE_STATIC_KEY_FALSE(ksu_is_input_hook_enabled);/extern struct static_key_true ksu_is_input_hook_enabled;/' drivers/input/input.c 2>/dev/null || true
 
 if [ -f fs/read_write.c ]; then
-  grep -q "DEFINE_STATIC_KEY_FALSE.*ksu_is_init_rc_hook_enabled" fs/read_write.c || \
+  grep -q "extern struct static_key_true ksu_is_init_rc_hook_enabled" fs/read_write.c || \
 sed -i 's/DEFINE_STATIC_KEY_FALSE(ksu_is_init_rc_hook_enabled);/extern struct static_key_true ksu_is_init_rc_hook_enabled;/' fs/read_write.c 2>/dev/null || true
 fi
 
