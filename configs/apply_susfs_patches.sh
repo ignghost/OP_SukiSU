@@ -272,12 +272,64 @@ fix_sukisu_ksud_integration_c() {
   if grep -q 'ksu_is_init_rc_hook_enabled' "$target" || grep -q 'ksu_is_input_hook_enabled' "$target"; then
     grep -q '#include <linux/jump_label.h>' "$target" || sed -i '1i#include <linux/jump_label.h>' "$target"
     if grep -q 'ksu_is_init_rc_hook_enabled' "$target" && ! grep -Eq 'extern[[:space:]]+struct[[:space:]]+static_key_(true|false)[[:space:]]+ksu_is_init_rc_hook_enabled' "$target"; then
-      sed -i '/#include <linux\/jump_label.h>/a extern struct static_key_false ksu_is_init_rc_hook_enabled;' "$target"
+      sed -i '/#include <linux\/jump_label.h>/a extern struct static_key_true ksu_is_init_rc_hook_enabled;' "$target"
     fi
     if grep -q 'ksu_is_input_hook_enabled' "$target" && ! grep -Eq 'extern[[:space:]]+struct[[:space:]]+static_key_(true|false)[[:space:]]+ksu_is_input_hook_enabled' "$target"; then
-      sed -i '/#include <linux\/jump_label.h>/a extern struct static_key_false ksu_is_input_hook_enabled;' "$target"
+      sed -i '/#include <linux\/jump_label.h>/a extern struct static_key_true ksu_is_input_hook_enabled;' "$target"
     fi
   fi
+
+  # If this translation unit defines a jump-label key, do not leave an
+  # extern declaration with a different key type above the definition.
+  python3 - "$target" <<'PYKEY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text()
+for name in ("ksu_is_init_rc_hook_enabled", "ksu_is_input_hook_enabled"):
+    if re.search(r"DEFINE_STATIC_KEY_(?:TRUE|FALSE)\s*\(\s*" + re.escape(name) + r"\s*\)", source):
+        source = re.sub(
+            r"^[ \t]*extern[ \t]+struct[ \t]+static_key_(?:true|false)[ \t]+" + re.escape(name) + r"[ \t]*;[ \t]*\n",
+            "", source, flags=re.M)
+path.write_text(source)
+PYKEY
+
+  # fs/stat.c is the single owner of these global keys. Remove any stale
+  # definitions from this translation unit to prevent duplicate vmlinux symbols.
+  python3 - "$target" <<'PYKEYOWNER'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text()
+for name in ("ksu_is_init_rc_hook_enabled", "ksu_is_input_hook_enabled", "is_first_zygote"):
+    source = re.sub(
+        r"(?m)^[ \t]*DEFINE_STATIC_KEY_(?:TRUE|FALSE)[ \t]*\([ \t]*" + re.escape(name) + r"[ \t]*\)[ \t]*;[ \t]*(?:\n|$)",
+        "", source)
+path.write_text(source)
+PYKEYOWNER
+
+  # Re-add correct extern declarations after removing any stale local definitions.
+  python3 - "$target" <<'PYKEYDECL'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text()
+for name in ("ksu_is_init_rc_hook_enabled", "ksu_is_input_hook_enabled"):
+    if re.search(r"\b" + re.escape(name) + r"\b", source):
+        decl = re.compile(r"(?m)^([ \t]*extern[ \t]+struct[ \t]+static_key_)(?:true|false)([ \t]+" + re.escape(name) + r"[ \t]*;[ \t]*)$")
+        source, count = decl.subn(r"\1true\2", source)
+        if not count:
+            include = re.compile(r"(?m)^([ \t]*#include <linux/jump_label\.h>)[ \t]*$")
+            if not re.search(r"(?m)^\s*extern\s+struct\s+static_key_true\s+" + re.escape(name) + r"\s*;", source):
+                source, count = include.subn(lambda m: m.group(1) + "\nextern struct static_key_true " + name + ";", source, count=1)
+path.write_text(source)
+PYKEYDECL
 
   neutralize_ksu_late_loaded "$target"
 
@@ -437,10 +489,44 @@ fix_sukisu_sucompat_api() {
 
   [ -f "$c" ] || { echo "ℹ️ sucompat.c not found in $base, skipping"; return 0; }
 
+  # Some SukiSU trees already provide userspace_stack_buffer() as a
+  # static inline in include/util.h. Remove any legacy local definition from
+  # sucompat.c in that case to avoid a same-translation-unit redefinition.
+  if [ -f "$base/include/util.h" ] && \
+     grep -qE '(^|[[:space:]])static[[:space:]]+inline[[:space:]]+void[[:space:]]*__user[[:space:]]*\*[[:space:]]*userspace_stack_buffer[[:space:]]*\(' "$base/include/util.h"; then
+    python3 - "$c" <<'PYDEDUP'
+from pathlib import Path
+import re, sys
+p = Path(sys.argv[1])
+s = p.read_text()
+pattern = re.compile(r'(?m)^static\s+void\s*__user\s*\*\s*userspace_stack_buffer\s*\([^)]*\)\s*\{')
+m = pattern.search(s)
+if m:
+    brace = s.find('{', m.start())
+    depth = 0
+    end = None
+    for i in range(brace, len(s)):
+        if s[i] == '{': depth += 1
+        elif s[i] == '}':
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end is None:
+        raise SystemExit('Unbalanced userspace_stack_buffer() definition in ' + str(p))
+    while end < len(s) and s[end] in ' \t': end += 1
+    if end < len(s) and s[end] == '\n': end += 1
+    s = s[:m.start()] + s[end:]
+    p.write_text(s)
+    print('  Removed duplicate local userspace_stack_buffer(); using include/util.h inline helper')
+PYDEDUP
+  fi
+
   # Compatibility for SukiSU revisions where sucompat.c calls
-  # userspace_stack_buffer() but the helper definition is missing.
+  # userspace_stack_buffer() but no definition exists in either source or util.h.
   if grep -q 'userspace_stack_buffer[[:space:]]*(' "$c" && \
-     ! grep -qE '(^|[[:space:]])(static[[:space:]]+)?[^;]*userspace_stack_buffer[[:space:]]*\([^;]*\)[[:space:]]*\{' "$c"; then
+     ! grep -qE '(^|[[:space:]])(static[[:space:]]+)?[^;]*userspace_stack_buffer[[:space:]]*\([^;]*\)[[:space:]]*\{' "$c" && \
+     ! { [ -f "$base/include/util.h" ] && grep -qE '(^|[[:space:]])(static[[:space:]]+)?[^;]*userspace_stack_buffer[[:space:]]*\([^;]*\)[[:space:]]*\{' "$base/include/util.h"; }; then
     echo "  Restoring missing userspace_stack_buffer() helper in: $c"
     grep -q '#include <linux/uaccess.h>' "$c" || sed -i '1i#include <linux/uaccess.h>' "$c"
     grep -q '#include <asm/processor.h>' "$c" || sed -i '1i#include <asm/processor.h>' "$c"
@@ -1117,6 +1203,57 @@ fi
   echo "✅ Fixed $target"
 }
 
+fix_sukisu_uapi_compatibility() {
+  # extension.h embeds this command structure by value, so a forward declaration
+  # is insufficient. Define it before the use and guard the copy in supercall.h.
+  local ext="$COMMON_KERNEL_FOLDER/include/uapi/extension.h"
+  local sc="$COMMON_KERNEL_FOLDER/include/uapi/supercall.h"
+
+  if [ -f "$ext" ] && grep -qE 'struct[[:space:]]+ksu_add_try_umount_cmd[[:space:]]+add[[:space:]]*;' "$ext"; then
+    if [ -f "$sc" ] && ! grep -q 'KSU_ADD_TRY_UMOUNT_CMD_DEFINED' "$sc"; then
+      perl -0pi -e 's{(^[\t ]*struct[\t ]+ksu_add_try_umount_cmd[\t ]*\{.*?^[\t ]*\};)}{#ifndef KSU_ADD_TRY_UMOUNT_CMD_DEFINED\n#define KSU_ADD_TRY_UMOUNT_CMD_DEFINED\n$1\n#endif}ms' "$sc"
+    fi
+
+    if ! grep -q 'KSU_ADD_TRY_UMOUNT_CMD_DEFINED' "$ext"; then
+      grep -qE '^#include[[:space:]]*[<"]linux/types\.h[>"]' "$ext" || sed -i '1i#include <linux/types.h>' "$ext"
+      perl -0pi -e 's{(^#define[\t ]+[A-Za-z0-9_]+[\t ]*\n)}{$1#ifndef KSU_ADD_TRY_UMOUNT_CMD_DEFINED\n#define KSU_ADD_TRY_UMOUNT_CMD_DEFINED\nstruct ksu_add_try_umount_cmd {\n    __aligned_u64 arg;\n    __u32 flags;\n    __u8 mode;\n};\n#endif\n}m' "$ext"
+    fi
+  fi
+
+  # Some SukiSU revisions retain a call to the removed dynamic-manager loader.
+  # Keep it only if a real implementation exists; add the missing prototype for
+  # a global implementation, otherwise drop the obsolete call.
+  local target root def
+  for target in "$KSU_FOLDER/kernel/core/init.c" "$COMMON_KERNEL_FOLDER/drivers/kernelsu/core/init.c"; do
+    [ -f "$target" ] || continue
+    grep -qE 'ksu_dynamic_manager_load[[:space:]]*\(' "$target" || continue
+    def=""
+    for root in "$KSU_FOLDER/kernel" "$COMMON_KERNEL_FOLDER/drivers/kernelsu"; do
+      [ -d "$root" ] || continue
+      def="$(grep -R -nE '^[[:space:]]*(static[[:space:]]+)?void[[:space:]]+ksu_dynamic_manager_load[[:space:]]*\([^;]*\)[[:space:]]*\{' "$root" --include='*.c' 2>/dev/null | head -n 1 || true)"
+      [ -n "$def" ] && break
+    done
+
+    if [ -n "$def" ]; then
+      if [[ "$def" == "$target:"* ]]; then
+        if ! sed -n '1,/ksu_dynamic_manager_load[[:space:]]*();/p' "$target" | grep -qE '^[[:space:]]*(static[[:space:]]+)?void[[:space:]]+ksu_dynamic_manager_load[[:space:]]*\('; then
+          if [[ "$def" == *'static void'* ]]; then
+            sed -i '1i static void ksu_dynamic_manager_load(void);' "$target"
+          else
+            sed -i '1i void ksu_dynamic_manager_load(void);' "$target"
+          fi
+        fi
+      elif [[ "$def" != *'static void'* ]]; then
+        sed -i '1i extern void ksu_dynamic_manager_load(void);' "$target"
+      else
+        sed -i '/ksu_dynamic_manager_load[[:space:]]*();/d' "$target"
+      fi
+    else
+      sed -i '/ksu_dynamic_manager_load[[:space:]]*();/d' "$target"
+    fi
+  done
+}
+
 fix_sukisu_linker_symbols() {
   echo "Applying SukiSU linker-symbol compatibility cleanup..."
 
@@ -1144,44 +1281,6 @@ if [ -f "$kbuild" ]; then
 fi
   done
 
-  # Ensure the object that defines ksu_syscall_table is linked into the built-in
-  # KernelSU composite object. preinit.c calls this pointer on execve; merely
-  # cleaning sucompat.c references does not resolve that linker dependency.
-  python3 - "$KSU_FOLDER/kernel" "$COMMON_KERNEL_FOLDER/drivers/kernelsu" <<'PYKSUTABLE'
-from pathlib import Path
-import re
-import sys
-
-for root_arg in sys.argv[1:]:
-    root = Path(root_arg)
-    if not root.is_dir():
-        continue
-    kbuild = next((p for p in (root / "Kbuild", root / "Makefile") if p.is_file()), None)
-    if not kbuild:
-        continue
-    definitions = []
-    for source in root.rglob("*.c"):
-        try:
-            content = source.read_text(errors="ignore")
-        except OSError:
-            continue
-        # Match a storage definition, not an extern declaration or a use.
-        if re.search(r"(?m)^\s*(?!extern\b)(?:static\s+)?[\w\s*]+\bksu_syscall_table\s*(?:=[^;]*)?;", content):
-            definitions.append(source)
-    if not definitions:
-        continue
-    text = kbuild.read_text(errors="ignore")
-    for source in definitions:
-        obj = source.relative_to(root).with_suffix(".o").as_posix()
-        if re.search(r"(?m)^\s*(?:kernelsu|ksu)[-_]objs\s*\+?=.*\b" + re.escape(obj) + r"\b", text):
-            continue
-        # Keep the existing composite-object convention used by this script.
-        with kbuild.open("a") as stream:
-            stream.write("\nkernelsu-objs += " + obj + "\n")
-        text += "\nkernelsu-objs += " + obj + "\n"
-        print(f"Linked {obj} into {kbuild} (defines ksu_syscall_table)")
-PYKSUTABLE
-  
   for target in \
 "$KSU_FOLDER/kernel/core/init.c" \
 "$COMMON_KERNEL_FOLDER/drivers/kernelsu/core/init.c"; do
@@ -1217,58 +1316,7 @@ fi
 [ -f "$target" ] && mv "$target" "$target.disabled" || true
   done
 
-  # The SUSFS patch can add static-branch references without supplying the
-  # corresponding SukiSU keys in this kernel version. Define missing keys in
-  # the built-in KernelSU init object; keep fs/input users as externs.
-  python3 - "$KSU_FOLDER/kernel" "$COMMON_KERNEL_FOLDER/drivers/kernelsu" <<'PYKSUHOOKS'
-from pathlib import Path
-import re
-import sys
-
-symbols = {
-    "ksu_is_init_rc_hook_enabled": "DEFINE_STATIC_KEY_TRUE",
-    "ksu_is_input_hook_enabled": "DEFINE_STATIC_KEY_TRUE",
-    "is_first_zygote": "DEFINE_STATIC_KEY_TRUE",
-}
-for root_arg in sys.argv[1:]:
-    root = Path(root_arg)
-    if not root.is_dir():
-        continue
-    sources = list(root.rglob("*.c"))
-    all_text = {}
-    for source in sources:
-        try:
-            all_text[source] = source.read_text(errors="ignore")
-        except OSError:
-            pass
-    missing = []
-    for symbol, macro in symbols.items():
-        defined = any(re.search(
-            r"(?m)^\s*(?:DEFINE_STATIC_KEY_(?:TRUE|FALSE)\s*\(\s*" + re.escape(symbol) +
-            r"\s*\)|(?:struct\s+static_key_(?:true|false)|bool)\s+" + re.escape(symbol) +
-            r"\s*(?:__aligned\([^)]*\))?\s*(?:=|;))", text)
-            and not re.search(r"(?m)^\s*extern\b[^;]*\b" + re.escape(symbol) + r"\s*;", text)
-            for text in all_text.values())
-        if not defined and any(re.search(r"\b" + re.escape(symbol) + r"\b", text) for text in all_text.values()):
-            missing.append((symbol, macro))
-    if not missing:
-        continue
-    target = next((p for p in (root / "core/init.c", root / "init.c") if p.is_file()), None)
-    if target is None:
-        print(f"WARNING: cannot add missing static keys; no init.c under {root}")
-        continue
-    text = target.read_text(errors="ignore")
-    if "#include <linux/jump_label.h>" not in text:
-        text = "#include <linux/jump_label.h>\n" + text
-    additions = []
-    for symbol, macro in missing:
-        if not re.search(r"(?m)^\s*(?:DEFINE_STATIC_KEY_(?:TRUE|FALSE)\s*\(\s*" + re.escape(symbol) + r"\s*\)|(?:struct\s+static_key_(?:true|false)|bool)\s+" + re.escape(symbol) + r"\s*(?:__aligned\([^)]*\))?\s*=)", text):
-            additions.append(f"{macro}({symbol});")
-    if additions:
-        text = text.rstrip() + "\n\n" + "\n".join(additions) + "\n"
-        target.write_text(text)
-        print(f"Added missing SukiSU static-key definitions to {target}: {', '.join(x[0] for x in missing)}")
-PYKSUHOOKS
+  fix_sukisu_uapi_compatibility
 
   echo "✅ SukiSU linker-symbol compatibility cleanup completed"
 }
@@ -1326,6 +1374,35 @@ EXPECTED_SUKISU_REJECTS=(
 )
 
 resolve_sukisu_ksud_api_reject "kernel/runtime/ksud_integration.c.rej"
+
+# The current SUSFS enable-patch may try to replace SukiSU's legacy two-argument
+# setresuid handler with the upstream three-argument zygote/SUSFS implementation.
+# These are different hook APIs; do not apply the upstream handler over the SukiSU
+# implementation. Ignore only this exact API-mismatch reject, and keep the existing
+# source intact. Any other setuid-hook reject remains fatal.
+resolve_sukisu_setuid_api_reject() {
+  local rej="kernel/hook/setuid_hook.c.rej"
+  local target="kernel/hook/setuid_hook.c"
+
+  [ -f "$rej" ] || return 0
+
+  if [ -f "$target" ] \
+     && grep -qE 'ksu_handle_setresuid[[:space:]]*\([[:space:]]*uid_t[[:space:]]+old_uid[[:space:]]*,[[:space:]]*uid_t[[:space:]]+new_uid[[:space:]]*\)' "$target" \
+     && grep -qE '^\+int ksu_handle_setresuid\(uid_t ruid, uid_t euid, uid_t suid\)' "$rej" \
+     && grep -q 'susfs_zygote_sid' "$rej" \
+     && grep -q 'susfs_zygote_next_sid' "$rej"; then
+    echo "Keeping SukiSU's existing two-argument setresuid hook; skipping incompatible upstream SUSFS zygote-handler hunk: $rej"
+    rm -f "$rej"
+    return 0
+  fi
+
+  echo "::error::Cannot safely reconcile SUSFS setuid-hook reject: $rej"
+  echo "The source does not match the known SukiSU two-argument API; refusing to discard the reject."
+  cat "$rej"
+  exit 1
+}
+
+resolve_sukisu_setuid_api_reject
 
 if [ -n "$(find . -name '*.rej' -print -quit)" ]; then
   echo "KernelSU patch produced reject files:"
@@ -1565,11 +1642,11 @@ if [ -f drivers/kernelsu/runtime/ksud.c ]; then
 sed -i '1i\#include <linux/jump_label.h>\nDEFINE_STATIC_KEY_FALSE(ksu_init_rc_hook_key_false);\nDEFINE_STATIC_KEY_FALSE(ksu_input_hook_key_false);' drivers/kernelsu/runtime/ksud.c
 fi
 
-sed -i 's/DEFINE_STATIC_KEY_FALSE(ksu_is_init_rc_hook_enabled);/extern struct static_key_true ksu_is_init_rc_hook_enabled;/' fs/stat.c 2>/dev/null || true
-sed -i 's/DEFINE_STATIC_KEY_FALSE(ksu_is_input_hook_enabled);/extern struct static_key_true ksu_is_input_hook_enabled;/' drivers/input/input.c 2>/dev/null || true
+sed -i 's/extern struct static_key_true ksu_is_init_rc_hook_enabled;/DEFINE_STATIC_KEY_FALSE(ksu_is_init_rc_hook_enabled);/' fs/stat.c 2>/dev/null || true
+sed -i 's/extern struct static_key_true ksu_is_input_hook_enabled;/DEFINE_STATIC_KEY_FALSE(ksu_is_input_hook_enabled);/' drivers/input/input.c 2>/dev/null || true
 
 if [ -f fs/read_write.c ]; then
-  grep -q "extern struct static_key_true ksu_is_init_rc_hook_enabled" fs/read_write.c || \
+  grep -q "DEFINE_STATIC_KEY_FALSE.*ksu_is_init_rc_hook_enabled" fs/read_write.c || \
 sed -i 's/DEFINE_STATIC_KEY_FALSE(ksu_is_init_rc_hook_enabled);/extern struct static_key_true ksu_is_init_rc_hook_enabled;/' fs/read_write.c 2>/dev/null || true
 fi
 
@@ -1735,6 +1812,112 @@ PY
 fi
   fi
 
+  if [ -f fs/exec.c.rej ] && grep -qF '#include <linux/susfs_def.h>' fs/exec.c.rej && \
+     grep -qF '#include <linux/rseq.h>' fs/exec.c.rej && \
+     grep -qF '#include <linux/ksm.h>' fs/exec.c.rej; then
+    echo "Handling known SUSFS fs/exec.c susfs_def.h include reject..."
+    python3 <<'PYEXEC'
+from pathlib import Path
+import sys
+
+p = Path("fs/exec.c")
+if not p.exists():
+    raise SystemExit("::error::fs/exec.c is missing while resolving SUSFS include reject")
+s = p.read_text()
+if "#include <linux/susfs_def.h>" not in s:
+    # Prefer the same nearby include used by the patch; fall back only to
+    # existing Linux header lines in this file if the Android 16 tree moved it.
+    anchors = [
+        "#include <linux/dma-buf.h>",
+        "#include <linux/ksm.h>",
+        "#include <linux/rseq.h>",
+        "#include <linux/binfmts.h>",
+    ]
+    anchor = next((a for a in anchors if a in s), None)
+    if anchor is None:
+        raise SystemExit("::error::Could not find a safe Linux-header anchor in fs/exec.c")
+    include = "#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif"
+    s = s.replace(anchor, anchor + "\n" + include, 1)
+if "#include <linux/susfs_def.h>" not in s:
+    raise SystemExit("::error::Failed to add SUSFS header to fs/exec.c")
+p.write_text(s)
+PYEXEC
+    if grep -qF '#include <linux/susfs_def.h>' fs/exec.c; then
+      rm -f fs/exec.c.rej
+      handled_rejects=1
+    else
+      echo "::error::Failed to resolve the known fs/exec.c SUSFS reject"
+      cat fs/exec.c.rej
+      exit 1
+    fi
+  fi
+
+  if [ -f fs/namespace.c.rej ] && grep -q 'CL_COPY_MNT_NS BIT(25)' fs/namespace.c.rej && grep -q 'susfs_is_current_ksu_domain' fs/namespace.c.rej; then
+    echo "Handling known SUSFS fs/namespace.c include/declaration reject..."
+
+    if ! grep -qF '#include <linux/susfs_def.h>' fs/namespace.c; then
+      if grep -qF '#include <linux/mnt_idmapping.h>' fs/namespace.c; then
+        sed -i '/#include <linux\/mnt_idmapping.h>/a #ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif // #ifdef CONFIG_KSU_SUSFS' fs/namespace.c
+      else
+        echo "::error::Could not find a safe include anchor in fs/namespace.c"
+        cat fs/namespace.c.rej
+        exit 1
+      fi
+    fi
+
+    if ! grep -qF 'extern bool susfs_is_current_ksu_domain(void);' fs/namespace.c || \
+       ! grep -qF 'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;' fs/namespace.c || \
+       ! grep -qF '#define CL_COPY_MNT_NS BIT(25)' fs/namespace.c; then
+      python3 - <<'PYNS'
+from pathlib import Path
+p = Path("fs/namespace.c")
+s = p.read_text()
+# This Android 13 vendor tree may omit trace/hooks/blk.h, so use a stable
+# file-scope anchor when the upstream include anchor is unavailable.
+if "extern bool susfs_is_current_ksu_domain(void);" not in s:
+    block = """#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+extern bool susfs_is_current_ksu_domain(void);
+extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
+#ifndef CL_COPY_MNT_NS
+#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */
+#endif
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+
+"""
+    if "#include <trace/hooks/blk.h>" in s:
+        anchor = "#include <trace/hooks/blk.h>"
+        s = s.replace(anchor, anchor + "\n\n" + block, 1)
+    else:
+        anchors = ["/* Maximum number of mounts in a mount namespace */",
+                   "unsigned int sysctl_mount_max __read_mostly = 100000;"]
+        anchor = next((item for item in anchors if item in s), None)
+        if anchor is None:
+            raise SystemExit("::error::Could not find a stable file-scope anchor in fs/namespace.c")
+        s = s.replace(anchor, block + anchor, 1)
+else:
+    if "extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;" not in s:
+        anchor = "extern bool susfs_is_current_ksu_domain(void);"
+        s = s.replace(anchor, anchor + "\nextern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;", 1)
+    if "#define CL_COPY_MNT_NS BIT(25)" not in s:
+        anchor = "extern bool susfs_is_current_ksu_domain(void);"
+        s = s.replace(anchor, "#ifndef CL_COPY_MNT_NS\n#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */\n#endif\n" + anchor, 1)
+p.write_text(s)
+PYNS
+    fi
+
+    if grep -qF '#include <linux/susfs_def.h>' fs/namespace.c && \
+       grep -qF 'extern bool susfs_is_current_ksu_domain(void);' fs/namespace.c && \
+       grep -qF 'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;' fs/namespace.c && \
+       grep -qF '#define CL_COPY_MNT_NS BIT(25)' fs/namespace.c; then
+      rm -f fs/namespace.c.rej
+      handled_rejects=1
+    else
+      echo "::error::Failed to resolve the known fs/namespace.c SUSFS reject safely"
+      cat fs/namespace.c.rej
+      exit 1
+    fi
+  fi
+
   if [ -n "$(find . -name "*.rej" -print -quit)" ]; then
 echo "::error::SUSFS patch failed. Remaining reject files:"
 find . -name "*.rej" -exec echo "=== {} ===" \; -exec cat {} \;
@@ -1744,6 +1927,39 @@ exit 1
   if [ "$handled_rejects" != "1" ]; then
 echo "::error::SUSFS patch failed and no known fallback matched."
 exit 1
+  fi
+fi
+
+# Ensure task_mmu.c sees SUSFS inode helper macros even when the patch's
+# include hunk did not apply to this kernel tree.
+if [ -f fs/proc/task_mmu.c ] && ! grep -qF '#include <linux/susfs_def.h>' fs/proc/task_mmu.c; then
+  python3 <<'PYTASKMMU'
+from pathlib import Path
+import re
+import sys
+
+path = Path("fs/proc/task_mmu.c")
+text = path.read_text()
+if "#include <linux/susfs_def.h>" in text:
+    raise SystemExit(0)
+
+# Place the guarded include after the existing Linux-header block. This avoids
+# depending on a specific include that differs across Android 13 vendor trees.
+matches = list(re.finditer(r"(?m)^#include\s+[<\"]linux/[^>\"]+[>\"]\s*$", text))
+if not matches:
+    print("::error::Could not find a Linux-header anchor in fs/proc/task_mmu.c")
+    sys.exit(1)
+last = matches[-1]
+insert = "\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif // CONFIG_KSU_SUSFS\n"
+text = text[:last.end()] + insert + text[last.end():]
+path.write_text(text)
+PYTASKMMU
+fi
+
+if [ -f fs/proc/task_mmu.c ]; then
+  if grep -Eq 'SUSFS_IS_INODE_(OPEN_REDIRECT|SUS_MAP)' fs/proc/task_mmu.c && ! grep -qF '#include <linux/susfs_def.h>' fs/proc/task_mmu.c; then
+    echo "::error::SUSFS inode macros are used in task_mmu.c but susfs_def.h is missing"
+    exit 1
   fi
 fi
 
@@ -1814,6 +2030,39 @@ fix_sukisu_linker_symbols
 # =============================================================================
 # Final safety sweep
 # =============================================================================
+
+# Final deduplication after all KernelSU source sync/copy operations. Some
+# device workflows overwrite the earlier patched sucompat.c during staging.
+if [ -f drivers/kernelsu/include/util.h ] && \
+   grep -qE '(^|[[:space:]])static[[:space:]]+inline[[:space:]]+void[[:space:]]*__user[[:space:]]*\*[[:space:]]*userspace_stack_buffer[[:space:]]*\(' drivers/kernelsu/include/util.h && \
+   [ -f drivers/kernelsu/feature/sucompat.c ]; then
+  python3 - drivers/kernelsu/feature/sucompat.c <<'PYFINALDEDUP'
+from pathlib import Path
+import re, sys
+p = Path(sys.argv[1])
+s = p.read_text()
+pattern = re.compile(r'(?m)^\s*static\s+void\s*__user\s*\*\s*userspace_stack_buffer\s*\([^)]*\)\s*\{')
+m = pattern.search(s)
+if m:
+    brace = s.find('{', m.start())
+    depth = 0
+    end = None
+    for i in range(brace, len(s)):
+        if s[i] == '{': depth += 1
+        elif s[i] == '}':
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end is None:
+        raise SystemExit('Unbalanced userspace_stack_buffer() definition in ' + str(p))
+    while end < len(s) and s[end] in ' \t': end += 1
+    if end < len(s) and s[end] == '\n': end += 1
+    s = s[:m.start()] + s[end:]
+    p.write_text(s)
+    print('Removed duplicate userspace_stack_buffer() from ' + str(p))
+PYFINALDEDUP
+fi
 
 echo "Running final SukiSU targeted safety sweep..."
 
@@ -2147,6 +2396,143 @@ if [ -n "$_KSU_KCONFIG" ]; then
 else
   echo "::warning::Could not locate KSU Kconfig to verify SUSFS defconfig options"
 fi
+
+# Final linker compatibility pass for the Android 14 / 6.1 built-in SukiSU tree.
+# Keep SUSFS references backed by symbols in objects that are definitely linked.
+python3 - "$COMMON_KERNEL_FOLDER" "$KSU_FOLDER/kernel" <<'PYLINKERFINAL'
+from pathlib import Path
+import re
+import sys
+
+common = Path(sys.argv[1])
+ksu_root = Path(sys.argv[2])
+ksu_build = common / "drivers/kernelsu"
+
+# These are jump-label keys referenced by SUSFS-patched core kernel files.
+# Put their single definitions in fs/stat.c (a built kernel object), not in a
+# potentially separate/unlinked copy of the SukiSU checkout.
+keys = (
+    "ksu_is_init_rc_hook_enabled",
+    "ksu_is_input_hook_enabled",
+    "is_first_zygote",
+)
+def key_definition(text, symbol):
+    return re.search(
+        r"(?m)^\s*(?:DEFINE_STATIC_KEY_(?:TRUE|FALSE)\s*\(\s*" + re.escape(symbol) +
+        r"\s*\)|(?:struct\s+static_key_(?:true|false)|bool)\s+" + re.escape(symbol) +
+        r"\s*(?:__aligned\([^)]*\))?\s*(?:=|;))\s*$", text
+    )
+
+def strip_key_definitions(path, symbols):
+    try:
+        text = path.read_text(errors="ignore")
+    except OSError:
+        return
+    lines = text.splitlines(keepends=True)
+    kept = []
+    changed = False
+    for line in lines:
+        remove = False
+        for symbol in symbols:
+            if re.match(r"^\s*(?:DEFINE_STATIC_KEY_(?:TRUE|FALSE)\s*\(\s*" + re.escape(symbol) +
+                        r"\s*\)|(?:struct\s+static_key_(?:true|false)|bool)\s+" + re.escape(symbol) +
+                        r"\s*(?:__aligned\([^)]*\))?\s*(?:=|;))\s*$", line) and not re.match(r"^\s*extern\b", line):
+                remove = True
+                break
+        if remove:
+            changed = True
+        else:
+            kept.append(line)
+    if changed:
+        path.write_text("".join(kept))
+
+stat_c = common / "fs/stat.c"
+if stat_c.is_file():
+    # Remove definitions from SukiSU files and the input hook file first, so
+    # there is one authoritative definition for each global key.
+    for root in (ksu_build, ksu_root, common / "drivers/input"):
+        if not root.is_dir():
+            continue
+        for source in root.rglob("*.c"):
+            try:
+                if source.resolve() == stat_c.resolve():
+                    continue
+            except OSError:
+                pass
+            strip_key_definitions(source, keys)
+
+    stat_text = stat_c.read_text(errors="ignore")
+    additions = []
+    for symbol in keys:
+        if not key_definition(stat_text, symbol):
+            additions.append(f"DEFINE_STATIC_KEY_TRUE({symbol});")
+    if additions:
+        if "#include <linux/jump_label.h>" not in stat_text:
+            stat_text = "#include <linux/jump_label.h>\n" + stat_text
+        stat_text = stat_text.rstrip() + "\n\n/* SukiSU/SUSFS linker compatibility keys */\n" + "\n".join(additions) + "\n"
+        stat_c.write_text(stat_text)
+        print("Placed missing SukiSU/SUSFS jump-label key definitions in fs/stat.c: " + ", ".join(x[len("DEFINE_STATIC_KEY_TRUE("):-2] for x in additions))
+
+# Ensure the translation unit defining ksu_syscall_table is linked into the
+# actual drivers/kernelsu composite object using the active Kbuild variable.
+if ksu_build.is_dir():
+    kbuild = next((p for p in (ksu_build / "Kbuild", ksu_build / "Makefile") if p.is_file()), None)
+    if kbuild:
+        definitions = []
+        for source in ksu_build.rglob("*.c"):
+            try:
+                text = source.read_text(errors="ignore")
+            except OSError:
+                continue
+            # Must be a non-static storage definition, not an extern or use.
+            if re.search(r"(?m)^\s*(?!extern\b|static\b)[\w\s*]+\bksu_syscall_table\s*(?:\[[^\]]*\])?\s*=", text):
+                definitions.append(source)
+        if definitions:
+            source = definitions[0]
+            obj = source.relative_to(ksu_build).with_suffix(".o").as_posix()
+            kbtext = kbuild.read_text(errors="ignore")
+            # Remove this object from the legacy alias if present, preserving
+            # any other object tokens on the same line.
+            lines = []
+            for line in kbtext.splitlines():
+                if re.match(r"\s*kernelsu-objs\s*\+?=", line) and re.search(r"(?<![\w./-])" + re.escape(obj) + r"(?![\w./-])", line):
+                    line = re.sub(r"(?<![\w./-])" + re.escape(obj) + r"(?![\w./-])", "", line)
+                    line = re.sub(r"\s+", " ", line).rstrip()
+                    if not re.match(r"\s*kernelsu-objs\s*\+?=\s*$", line):
+                        lines.append(line)
+                else:
+                    lines.append(line)
+            kbtext = "\n".join(lines) + "\n"
+            if not re.search(r"(?m)^\s*kernelsu-y\s*\+?=.*(?<![\w./-])" + re.escape(obj) + r"(?![\w./-])", kbtext):
+                kbtext = kbtext.rstrip() + "\nkernelsu-y += " + obj + "\n"
+                kbuild.write_text(kbtext)
+                print(f"Linked ksu_syscall_table definition object with kernelsu-y: {obj}")
+        else:
+            print("WARNING: no global ksu_syscall_table definition found under drivers/kernelsu")
+
+# Newer SukiSU trees may retain a declaration/reference but no linked implementation
+# of this legacy tracepoint helper. Only a real function definition counts.
+setuid_hook = ksu_build / "hook/setuid_hook.c"
+if setuid_hook.is_file():
+    all_ksu_text = "\n".join(p.read_text(errors="ignore") for p in ksu_build.rglob("*.[ch]") if p.is_file())
+    symbol = "ksu_clear_task_tracepoint_flag_if_needed"
+    definition = re.compile(
+        r"(?m)^[ \t]*(?:static[ \t]+)?[\w\s*]+?\b" + re.escape(symbol) +
+        r"[ \t]*\([^;{}]*\)[ \t\n]*\{"
+    )
+    # The helper can exist in an unlinked legacy source file and still fail at final
+    # link. Remove the obsolete call from the object actually built, regardless of
+    # whether an unlinked copy of the helper definition is present elsewhere.
+    original = setuid_hook.read_text(errors="ignore")
+    updated = re.sub(
+        r"(?m)^[ \t]*" + re.escape(symbol) + r"[ \t]*\([^;]*\);[ \t]*(?:\n|$)",
+        "",
+        original,
+    )
+    if updated != original:
+        setuid_hook.write_text(updated)
+        print("Removed obsolete ksu_clear_task_tracepoint_flag_if_needed() call from built hook/setuid_hook.c")
+PYLINKERFINAL
 
 # Finalize execveat init symbol ownership after all compatibility rewrites.
 # SukiSU/SUSFS variants may define this in sucompat.c or ksud_integration.c,
