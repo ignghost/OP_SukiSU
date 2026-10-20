@@ -396,7 +396,6 @@ checks = {
     ksu: [
         r'(?m)^[\t ]*bool[\t ]+ksu_selinux_hide_enabled\b',
         r'(?m)^[\t ]*bool[\t ]+ksu_selinux_hide_running\b',
-        r'(?m)^[\t ]*struct[\t ]+selinux_state[\t ]+fake_state[\t ]*;',
         r'(?m)^[\t ]*DEFINE_STATIC_KEY_FALSE[\t ]*\([\t ]*fake_status_initialize_key[\t ]*\)[\t ]*;',
         r'(?m)^[\t ]*struct[\t ]+page[\t ]*\*[\t ]*fake_status[\t ]*=',
         r'(?m)^[\t ]*void[\t ]+initialize_fake_status[\t ]*\(',
@@ -407,6 +406,19 @@ for path, patterns in checks.items():
     for pattern in patterns:
         if not re.search(pattern, content):
             raise SystemExit(f"::error::SELinux Hide global definition missing after repair: {path} / {pattern}")
+
+# Older SukiSU SELinux-hide variants do not declare fake_state at all. Require
+# the global only when another SELinux source file actually consumes it; don't
+# reject otherwise-valid trees just because this optional legacy symbol is absent.
+external_fake_state_use = False
+for path in (selinuxfs, services, root / "security/selinux/hooks.c"):
+    if path.is_file() and re.search(r"\bfake_state\b", path.read_text()):
+        external_fake_state_use = True
+        break
+if external_fake_state_use and not re.search(
+        r'(?m)^[\t ]*struct[\t ]+selinux_state[\t ]+fake_state[\t ]*;',
+        ksu.read_text()):
+    raise SystemExit(f"::error::SELinux Hide fake_state is referenced by SELinux consumers but has no global definition in {ksu}")
 print("SELinux Hide cross-file symbol definitions validated")
 PYLINK
 }
