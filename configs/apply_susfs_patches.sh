@@ -270,66 +270,18 @@ fix_sukisu_ksud_integration_c() {
   # in fs/stat.c and drivers/input/input.c. ksud_integration.c uses them to
   # disable the optional hooks, so it must declare them explicitly.
   if grep -q 'ksu_is_init_rc_hook_enabled' "$target" || grep -q 'ksu_is_input_hook_enabled' "$target"; then
+    # These keys are owned by the kernel-side compatibility definitions,
+    # not by ksud_integration.c. Keep the extern declarations and remove
+    # any stale local DEFINE_STATIC_KEY_* definitions before compiling.
+    sed -i -E '/^[[:space:]]*DEFINE_STATIC_KEY_(TRUE|FALSE)[[:space:]]*\([[:space:]]*(ksu_is_init_rc_hook_enabled|ksu_is_input_hook_enabled)[[:space:]]*\)[[:space:]]*;[[:space:]]*$/d' "$target"
     grep -q '#include <linux/jump_label.h>' "$target" || sed -i '1i#include <linux/jump_label.h>' "$target"
     if grep -q 'ksu_is_init_rc_hook_enabled' "$target" && ! grep -Eq 'extern[[:space:]]+struct[[:space:]]+static_key_(true|false)[[:space:]]+ksu_is_init_rc_hook_enabled' "$target"; then
-      sed -i '/#include <linux\/jump_label.h>/a extern struct static_key_true ksu_is_init_rc_hook_enabled;' "$target"
+      sed -i '/#include <linux\/jump_label.h>/a extern struct static_key_false ksu_is_init_rc_hook_enabled;' "$target"
     fi
     if grep -q 'ksu_is_input_hook_enabled' "$target" && ! grep -Eq 'extern[[:space:]]+struct[[:space:]]+static_key_(true|false)[[:space:]]+ksu_is_input_hook_enabled' "$target"; then
-      sed -i '/#include <linux\/jump_label.h>/a extern struct static_key_true ksu_is_input_hook_enabled;' "$target"
+      sed -i '/#include <linux\/jump_label.h>/a extern struct static_key_false ksu_is_input_hook_enabled;' "$target"
     fi
   fi
-
-  # If this translation unit defines a jump-label key, do not leave an
-  # extern declaration with a different key type above the definition.
-  python3 - "$target" <<'PYKEY'
-from pathlib import Path
-import re
-import sys
-
-path = Path(sys.argv[1])
-source = path.read_text()
-for name in ("ksu_is_init_rc_hook_enabled", "ksu_is_input_hook_enabled"):
-    if re.search(r"DEFINE_STATIC_KEY_(?:TRUE|FALSE)\s*\(\s*" + re.escape(name) + r"\s*\)", source):
-        source = re.sub(
-            r"^[ \t]*extern[ \t]+struct[ \t]+static_key_(?:true|false)[ \t]+" + re.escape(name) + r"[ \t]*;[ \t]*\n",
-            "", source, flags=re.M)
-path.write_text(source)
-PYKEY
-
-  # fs/stat.c is the single owner of these global keys. Remove any stale
-  # definitions from this translation unit to prevent duplicate vmlinux symbols.
-  python3 - "$target" <<'PYKEYOWNER'
-from pathlib import Path
-import re
-import sys
-
-path = Path(sys.argv[1])
-source = path.read_text()
-for name in ("ksu_is_init_rc_hook_enabled", "ksu_is_input_hook_enabled", "is_first_zygote"):
-    source = re.sub(
-        r"(?m)^[ \t]*DEFINE_STATIC_KEY_(?:TRUE|FALSE)[ \t]*\([ \t]*" + re.escape(name) + r"[ \t]*\)[ \t]*;[ \t]*(?:\n|$)",
-        "", source)
-path.write_text(source)
-PYKEYOWNER
-
-  # Re-add correct extern declarations after removing any stale local definitions.
-  python3 - "$target" <<'PYKEYDECL'
-from pathlib import Path
-import re
-import sys
-
-path = Path(sys.argv[1])
-source = path.read_text()
-for name in ("ksu_is_init_rc_hook_enabled", "ksu_is_input_hook_enabled"):
-    if re.search(r"\b" + re.escape(name) + r"\b", source):
-        decl = re.compile(r"(?m)^([ \t]*extern[ \t]+struct[ \t]+static_key_)(?:true|false)([ \t]+" + re.escape(name) + r"[ \t]*;[ \t]*)$")
-        source, count = decl.subn(r"\1true\2", source)
-        if not count:
-            include = re.compile(r"(?m)^([ \t]*#include <linux/jump_label\.h>)[ \t]*$")
-            if not re.search(r"(?m)^\s*extern\s+struct\s+static_key_true\s+" + re.escape(name) + r"\s*;", source):
-                source, count = include.subn(lambda m: m.group(1) + "\nextern struct static_key_true " + name + ";", source, count=1)
-path.write_text(source)
-PYKEYDECL
 
   neutralize_ksu_late_loaded "$target"
 
@@ -1610,13 +1562,89 @@ echo "Applied MDIR-based KSU include-path fix (6.12+) to drivers/kernelsu/Kbuild
   fi
 fi
 
-ARCH_H="$(find "$KERNEL_PLATFORM_FOLDER/KernelSU" -name "arch.h" -type f 2>/dev/null | head -n 1 || true)"
+# Keep KernelSU architecture headers together. Search the actual kernel-side
+# checkout and the platform tree, while excluding userspace/nolibc headers.
+ARCH_SEARCH_ROOTS=()
+[ -d "$KERNEL_PLATFORM_FOLDER/KernelSU" ] && ARCH_SEARCH_ROOTS+=("$KERNEL_PLATFORM_FOLDER/KernelSU")
+[ -d "$KERNEL_PLATFORM_FOLDER/drivers/kernelsu" ] && ARCH_SEARCH_ROOTS+=("$KERNEL_PLATFORM_FOLDER/drivers/kernelsu")
+ARCH_SEARCH_ROOTS+=("$KERNEL_PLATFORM_FOLDER")
 
-if [ -n "$ARCH_H" ]; then
-  for dest in feature hook infra selinux supercall core runtime; do
-if [ -d "drivers/kernelsu/$dest" ]; then
-  cp "$ARCH_H" "drivers/kernelsu/$dest/" 2>/dev/null || true
+find_arch_header() {
+  local header="$1" root found
+  for root in "${ARCH_SEARCH_ROOTS[@]}"; do
+    found="$(find -L "$root" \
+      -path '*/userspace/*' -prune -o \
+      -path '*/nolibc/*' -prune -o \
+      -path '*/tools/include/nolibc/*' -prune -o \
+      -path '*/.git/*' -prune -o \
+      -type f -name "$header" -print 2>/dev/null | head -n 1 || true)"
+    if [ -n "$found" ]; then
+      printf '%s\n' "$found"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ARCH_H="$(find_arch_header arch.h || true)"
+ARCH_ARM64_H="$(find_arch_header arch-arm64.h || true)"
+ARCH_COMPILER_H=""
+ARCH_CRT_H=""
+if [ -n "$ARCH_ARM64_H" ]; then
+  ARCH_COMPILER_H="$(find "$(dirname "$ARCH_ARM64_H")" -maxdepth 3 -type f -name compiler.h -print 2>/dev/null | head -n 1 || true)"
+  ARCH_CRT_H="$(find "$(dirname "$ARCH_ARM64_H")" -maxdepth 4 -type f -name crt.h -print 2>/dev/null | head -n 1 || true)"
 fi
+if [ -z "$ARCH_COMPILER_H" ]; then
+  ARCH_COMPILER_H="$(find_arch_header compiler.h || true)"
+fi
+if [ -z "$ARCH_CRT_H" ]; then
+  ARCH_CRT_H="$(find_arch_header crt.h || true)"
+fi
+
+for dest in feature hook infra selinux supercall core runtime; do
+  dest_dir="drivers/kernelsu/$dest"
+  [ -d "$dest_dir" ] || continue
+  if [ -n "$ARCH_H" ] && grep -q '"arch-arm64.h"' "$ARCH_H"; then
+    cp "$ARCH_H" "$dest_dir/arch.h" 2>/dev/null || true
+  fi
+  if [ -n "$ARCH_ARM64_H" ]; then
+    cp "$ARCH_ARM64_H" "$dest_dir/arch-arm64.h" 2>/dev/null || true
+  fi
+  if [ -n "$ARCH_COMPILER_H" ] && [ -f "$dest_dir/arch-arm64.h" ] && grep -q '"compiler.h"' "$dest_dir/arch-arm64.h"; then
+    cp "$ARCH_COMPILER_H" "$dest_dir/compiler.h" 2>/dev/null || true
+    # Avoid the kernel's fallthrough macro being expanded inside nolibc's
+    # __has_attribute() test when this header is included by kernel code.
+    sed -i 's/__nolibc_has_attribute(fallthrough)/__nolibc_has_attribute(__fallthrough__)/g' "$dest_dir/compiler.h" 2>/dev/null || true
+  fi
+  if [ -n "$ARCH_CRT_H" ] && [ -f "$dest_dir/arch-arm64.h" ] && grep -q '"crt.h"' "$dest_dir/arch-arm64.h"; then
+    cp "$ARCH_CRT_H" "$dest_dir/crt.h" 2>/dev/null || true
+  fi
+done
+
+if [ -n "$ARCH_H" ] && grep -q '"arch-arm64.h"' "$ARCH_H"; then
+  for dest in feature hook infra selinux supercall core runtime; do
+    if [ -f "drivers/kernelsu/$dest/arch.h" ] && [ ! -f "drivers/kernelsu/$dest/arch-arm64.h" ]; then
+      echo "::error::KernelSU arch.h requires arch-arm64.h, but no kernel-side copy was found in the platform/SukiSU tree."
+      exit 1
+    fi
+  done
+fi
+
+if [ -n "$ARCH_ARM64_H" ] && grep -q '"compiler.h"' "$ARCH_ARM64_H"; then
+  for dest in feature hook infra selinux supercall core runtime; do
+    if [ -f "drivers/kernelsu/$dest/arch-arm64.h" ] && [ ! -f "drivers/kernelsu/$dest/compiler.h" ]; then
+      echo "::error::arch-arm64.h requires compiler.h, but the matching kernel-side header could not be located."
+      exit 1
+    fi
+  done
+fi
+
+if [ -n "$ARCH_ARM64_H" ] && grep -q '"crt.h"' "$ARCH_ARM64_H"; then
+  for dest in feature hook infra selinux supercall core runtime; do
+    if [ -f "drivers/kernelsu/$dest/arch-arm64.h" ] && [ ! -f "drivers/kernelsu/$dest/crt.h" ]; then
+      echo "::error::arch-arm64.h requires crt.h, but the matching kernel-side header could not be located."
+      exit 1
+    fi
   done
 fi
 
@@ -2420,7 +2448,7 @@ def key_definition(text, symbol):
     return re.search(
         r"(?m)^\s*(?:DEFINE_STATIC_KEY_(?:TRUE|FALSE)\s*\(\s*" + re.escape(symbol) +
         r"\s*\)|(?:struct\s+static_key_(?:true|false)|bool)\s+" + re.escape(symbol) +
-        r"\s*(?:__aligned\([^)]*\))?\s*(?:=|;))\s*$", text
+        r"\s*(?:__aligned\([^)]*\))?\s*(?:=[^;]*|;))\s*$", text
     )
 
 def strip_key_definitions(path, symbols):
@@ -2433,12 +2461,19 @@ def strip_key_definitions(path, symbols):
     changed = False
     for line in lines:
         remove = False
-        for symbol in symbols:
-            if re.match(r"^\s*(?:DEFINE_STATIC_KEY_(?:TRUE|FALSE)\s*\(\s*" + re.escape(symbol) +
-                        r"\s*\)|(?:struct\s+static_key_(?:true|false)|bool)\s+" + re.escape(symbol) +
-                        r"\s*(?:__aligned\([^)]*\))?\s*(?:=|;))\s*$", line) and not re.match(r"^\s*extern\b", line):
-                remove = True
-                break
+        if not re.match(r"^\s*extern\b", line):
+            for symbol in symbols:
+                token = re.escape(symbol)
+                macro_definition = re.search(
+                    r"\bDEFINE_STATIC_KEY_(?:TRUE|FALSE)\s*\([^)]*\b" + token + r"\b[^)]*\)\s*;?", line
+                )
+                typed_definition = re.search(
+                    r"(?:^|[;{}])\s*(?:struct\s+static_key_(?:true|false)|bool)\s+" + token +
+                    r"\b[^;]*;", line
+                )
+                if macro_definition or typed_definition:
+                    remove = True
+                    break
         if remove:
             changed = True
         else:
@@ -2460,6 +2495,13 @@ if stat_c.is_file():
             except OSError:
                 pass
             strip_key_definitions(source, keys)
+
+    integration = ksu_build / "runtime/ksud_integration.c"
+    if integration.is_file():
+        strip_key_definitions(integration, ("is_first_zygote",))
+        integration_text = integration.read_text(errors="ignore")
+        if re.search(r"(?m)^\s*DEFINE_STATIC_KEY_(?:TRUE|FALSE)\s*\([^)]*\bis_first_zygote\b[^)]*\)", integration_text) or re.search(r"(?m)^\s*(?:struct\s+static_key_(?:true|false)|bool)\s+is_first_zygote\b[^;]*;", integration_text):
+            raise SystemExit("Duplicate is_first_zygote definition remains in drivers/kernelsu/runtime/ksud_integration.c")
 
     stat_text = stat_c.read_text(errors="ignore")
     additions = []
