@@ -1809,6 +1809,59 @@ runs:
         echo "::group::Build kernel with ccache optimization"
         
         cd "$COMMON_KERNEL_FOLDER"
+
+        # Ensure SukiSU's preinit runner dependency is absolute. With O=out,
+        # a relative KSU_KERNEL_DIR can resolve runner.c outside the source tree.
+        KSU_KERNEL_BUILD_FILE="$COMMON_KERNEL_FOLDER/drivers/kernelsu/Kbuild"
+        KSU_RUNNER_SRC="$KERNEL_PLATFORM_FOLDER/KernelSU/kernel/preinit/runner/runner.c"
+        KERNEL_RUNNER_SRC="$COMMON_KERNEL_FOLDER/drivers/kernelsu/preinit/runner/runner.c"
+
+        if [ ! -s "$KERNEL_RUNNER_SRC" ]; then
+          if [ -s "$KSU_RUNNER_SRC" ]; then
+            mkdir -p "$(dirname "$KERNEL_RUNNER_SRC")"
+            cp "$KSU_RUNNER_SRC" "$KERNEL_RUNNER_SRC"
+          elif [ -n "${KSU_COMMIT_SHA:-}" ] && [ "$KSU_COMMIT_SHA" != "unknown" ]; then
+            mkdir -p "$(dirname "$KERNEL_RUNNER_SRC")"
+            curl --fail --location --silent --show-error --retry 3 --retry-delay 2 \
+              "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/$KSU_COMMIT_SHA/kernel/preinit/runner/runner.c" \
+              -o "$KERNEL_RUNNER_SRC"
+          else
+            echo "::error::Cannot restore runner.c: SukiSU source and commit are unavailable."
+            exit 1
+          fi
+        fi
+        if [ ! -s "$KERNEL_RUNNER_SRC" ]; then
+          echo "::error::runner.c is still missing: $KERNEL_RUNNER_SRC"
+          exit 1
+        fi
+
+        if [ -f "$KSU_KERNEL_BUILD_FILE" ]; then
+          if grep -qF 'KSU_KERNEL_DIR := $(abspath $(KSU_KERNEL_DIR))' "$KSU_KERNEL_BUILD_FILE"; then
+            echo "SukiSU Kbuild already normalizes KSU_KERNEL_DIR."
+          elif grep -qF 'ccflags-y += -I$(KSU_KERNEL_DIR) -I$(KSU_KERNEL_DIR)/include' "$KSU_KERNEL_BUILD_FILE"; then
+            python3 - "$KSU_KERNEL_BUILD_FILE" <<'PY_KSU_KBUILD_FIX'
+        import pathlib, sys
+        p = pathlib.Path(sys.argv[1])
+        s = p.read_text()
+        marker = 'ccflags-y += -I$(KSU_KERNEL_DIR) -I$(KSU_KERNEL_DIR)/include'
+        if 'KSU_KERNEL_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))' not in s:
+            if marker not in s:
+                raise SystemExit('KSU_KERNEL_DIR insertion point not found')
+            s = s.replace(marker, 'KSU_KERNEL_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))\n' + marker, 1)
+            p.write_text(s)
+        PY_KSU_KBUILD_FIX
+            echo "Set KSU_KERNEL_DIR to the directory containing SukiSU Kbuild."
+          else
+            echo "::error::Cannot normalize KSU_KERNEL_DIR: expected insertion point missing in $KSU_KERNEL_BUILD_FILE"
+            exit 1
+          fi
+        else
+          echo "::error::SukiSU Kbuild not found: $KSU_KERNEL_BUILD_FILE"
+          exit 1
+        fi
+
+        echo "Verified preinit runner source: $KERNEL_RUNNER_SRC ($(wc -c < "$KERNEL_RUNNER_SRC") bytes)."
+
         : > "$COMMON_KERNEL_FOLDER/.scmversion"
         
         export PYTHONWARNINGS="${PYTHONWARNINGS}"
