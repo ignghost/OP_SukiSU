@@ -1356,6 +1356,61 @@ resolve_sukisu_setuid_api_reject() {
 
 resolve_sukisu_setuid_api_reject
 
+resolve_susfs_policy_and_priority_rejects() {
+  python3 - <<'PYFIX'
+from pathlib import Path
+import re
+
+allow_rej = Path("kernel/policy/allowlist.c.rej")
+allow_src = Path("kernel/policy/allowlist.c")
+if allow_rej.exists():
+    rej = allow_rej.read_text(errors="replace")
+    if ("ksu_uid_should_umount" not in rej or
+        "ksu_is_manager_appid_valid" not in rej or
+        not allow_src.is_file()):
+        raise SystemExit("Cannot safely reconcile SUSFS allowlist reject")
+    src = allow_src.read_text()
+    pattern = re.compile(
+        r"(?m)^[ \t]*if \(likely\(ksu_is_manager_appid_valid\(\)\) && "
+        r"unlikely\(ksu_get_manager_appid\(\) == uid % PER_USER_RANGE\)\) \{\n"
+        r"[ \t]*// we should not umount on manager!\n"
+        r"[ \t]*return false;\n[ \t]*\}\n?"
+    )
+    if pattern.search(src):
+        src = pattern.sub("", src, count=1)
+        allow_src.write_text(src)
+    elif "ksu_is_manager_appid_valid" in src:
+        raise SystemExit("Allowlist source differs from expected SUSFS hunk")
+    allow_rej.unlink()
+    print("Resolved SUSFS allowlist reject")
+
+pkg_rej = Path("kernel/manager/pkg_observer.c.rej")
+pkg_src = Path("kernel/manager/pkg_observer.c")
+if pkg_rej.exists():
+    rej = pkg_rej.read_text(errors="replace")
+    if ("susfs_parse_priority_app_strings();" not in rej or
+        "ksu_defer_track_throne" not in rej or
+        not pkg_src.is_file()):
+        raise SystemExit("Cannot safely reconcile SUSFS package-observer reject")
+    src = pkg_src.read_text()
+    match = re.search(r"(?m)^(static\s+void\s+ksu_defer_track_throne\s*\(void\)\s*\{)", src)
+    if not match:
+        raise SystemExit("Cannot find ksu_defer_track_throne() in package observer")
+    body_start = match.end()
+    body_end = src.find("\n}", body_start)
+    if body_end < 0:
+        raise SystemExit("Cannot find end of ksu_defer_track_throne()")
+    body = src[body_start:body_end]
+    if "susfs_parse_priority_app_strings();" not in body:
+        src = src[:body_start] + "\n\tsusfs_parse_priority_app_strings();" + src[body_start:]
+        pkg_src.write_text(src)
+    pkg_rej.unlink()
+    print("Resolved SUSFS package-observer reject")
+PYFIX
+}
+
+resolve_susfs_policy_and_priority_rejects
+
 if [ -n "$(find . -name '*.rej' -print -quit)" ]; then
   echo "KernelSU patch produced reject files:"
   find . -name '*.rej' -exec echo "=== {} ===" \; -exec cat {} \;
