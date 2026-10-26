@@ -1810,38 +1810,6 @@ runs:
         
         cd "$COMMON_KERNEL_FOLDER"
 
-        # Fix the SukiSU preinit fd-close call for Android 12/13 kernel headers.
-        # Search the common kernel tree and wider platform tree, including common/source/.
-        python3 - "$COMMON_KERNEL_FOLDER" "$KERNEL_PLATFORM_FOLDER" <<'PY_PREINIT_FD_FIX'
-        import pathlib, re, sys
-        roots = [pathlib.Path(x) for x in sys.argv[1:] if x]
-        files = set()
-        for root in roots:
-            if root.is_dir():
-                files.update(root.glob('**/drivers/kernelsu/preinit/preinit.c'))
-        if not files:
-            raise SystemExit('SukiSU preinit.c not found; cannot apply fd-close compatibility fix')
-        for p in sorted(files):
-            s = p.read_text()
-            original = s
-            s = re.sub(r'__close_fd\s*\(\s*current->files\s*,\s*fd\s*\)', 'close_fd(fd)', s)
-            if '#include <linux/fdtable.h>' not in s:
-                m = list(re.finditer(r'^#include[^\n]*\n', s, re.M))
-                if not m:
-                    raise SystemExit('Cannot find include block in ' + str(p))
-                pos = m[-1].end()
-                s = s[:pos] + '#include <linux/fdtable.h>\n' + s[pos:]
-            if re.search(r'__close_fd\s*\(', s):
-                raise SystemExit('Unsupported __close_fd call remains in ' + str(p))
-            if 'close_fd(fd)' not in s:
-                raise SystemExit('Expected close_fd(fd) call not found in ' + str(p))
-            if s != original:
-                p.write_text(s)
-                print('Applied fd-close compatibility fix:', p)
-            else:
-                print('fd-close compatibility fix already present:', p)
-        PY_PREINIT_FD_FIX
-
         # Ensure SukiSU's preinit runner dependency is absolute. With O=out,
         # a relative KSU_KERNEL_DIR can resolve runner.c outside the source tree.
         KSU_KERNEL_BUILD_FILE="$COMMON_KERNEL_FOLDER/drivers/kernelsu/Kbuild"
@@ -1909,6 +1877,13 @@ runs:
         FPMAP="-ffile-prefix-map=${WORKSPACE}=."
         
         export KCFLAGS="${KCFLAGS:-} $MAP $MPMAP $FPMAP -no-canonical-prefixes -fdiagnostics-color=never -Qunused-arguments -Wno-unused-command-line-argument -D__ANDROID_COMMON_KERNEL__"
+        if [[ "${KSUVER:-}" =~ ^[0-9]+$ ]]; then
+          export KCFLAGS="$KCFLAGS -DKERNEL_SU_VERSION=${KSUVER}"
+          echo "Providing SukiSU working-version constant to kernel compilation: ${KSUVER}"
+        else
+          echo "::error::KSUVER is missing or invalid; cannot define KERNEL_SU_VERSION for version_spoof.c."
+          exit 1
+        fi
         export KCPPFLAGS="${KCPPFLAGS:-} $MAP $MPMAP $FPMAP"
         
         export LLVM=1 LLVM_IAS=1
