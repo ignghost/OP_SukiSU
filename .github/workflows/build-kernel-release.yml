@@ -652,19 +652,25 @@ jobs:
           fetch-depth: 1
 
       - name: 🧹 Emergency Disk Cleanup
-        if: ${{ matrix.disk_cleanup }}
         uses: ./.github/actions/disk-cleanup
 
       - name: Install Minimal Dependencies
         run: |
           set -euo pipefail
           echo "::group::Install dependencies"
+          df -h /
+          sudo apt-get clean || true
+          sudo rm -rf /var/cache/apt/archives/partial /var/lib/apt/lists/partial
+          if ! command -v gpgv >/dev/null 2>&1; then
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gpgv
+          fi
           sudo apt-get -o Acquire::Retries=3 update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            git curl ca-certificates build-essential clang lld flex bison \
+            git curl ca-certificates gnupg gpgv build-essential clang lld flex bison \
             libelf-dev libssl-dev libncurses-dev zlib1g-dev lz4 \
             libxml2-utils rsync unzip dwarves file python3 ccache jq bc dos2unix kmod libdw-dev elfutils pigz
           sudo apt-get clean
+          df -h /
           echo "✅ Dependencies installed"
           echo "::endgroup::"
 
