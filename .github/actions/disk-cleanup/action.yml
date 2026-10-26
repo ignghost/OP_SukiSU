@@ -39,7 +39,3 @@ runs:
         fi
         df -h /
         echo "::endgroup::"
-
-        disown
-        
-        echo "::endgroup::"
