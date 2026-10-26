@@ -40,7 +40,6 @@ runs:
         df -h /
         echo "::endgroup::"
 
-        
         disown
         
         echo "::endgroup::"
