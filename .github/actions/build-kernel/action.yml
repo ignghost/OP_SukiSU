@@ -1810,27 +1810,41 @@ runs:
         
         cd "$COMMON_KERNEL_FOLDER"
 
-                # Keep libbpf's path pointer const-correct for Clang 17.
-                LIBBPF_SOURCE="$COMMON_KERNEL_FOLDER/tools/lib/bpf/libbpf.c"
-                if [ -f "$LIBBPF_SOURCE" ]; then
-                  python3 - "$LIBBPF_SOURCE" <<'PY_LIBBPF_CONST_FIX'
-        import pathlib, re, sys
-        p = pathlib.Path(sys.argv[1])
-        s = p.read_text()
-        pattern = re.compile(r'(?m)^(\s*)char\s*\*\s*next_path\s*;')
-        s, count = pattern.subn(r'\1const char *next_path;', s)
-        if count:
-            p.write_text(s)
-            print(f'Applied const-correct next_path declaration in {p}')
-        elif re.search(r'(?m)^\s*const char\s*\*\s*next_path\s*;', s):
-            print('libbpf next_path declaration is already const-correct')
-        else:
-            raise SystemExit('Could not find next_path declaration in libbpf.c; refusing to guess a source edit')
+        python3 - "$COMMON_KERNEL_FOLDER/tools" <<'PY_LIBBPF_CONST_FIX'
+        from pathlib import Path
+        import re
+        import sys
+        
+        root = Path(sys.argv[1])
+        files = sorted(root.rglob("libbpf.c"))
+        patched = []
+        checked = []
+        for path in files:
+            try:
+                source = path.read_text()
+            except (OSError, UnicodeError):
+                continue
+            if "next_path = strchr(s, ':'" not in source:
+                continue
+            checked.append(path)
+            pattern = re.compile(r'(?m)^(\s*)char\s*\*\s*(next_path\b)')
+            updated, count = pattern.subn(r'\1const char *\2', source)
+            if count:
+                path.write_text(updated)
+                patched.append(path)
+                source = updated
+            if not re.search(r'(?m)^\s*const\s+char\s*\*\s*next_path\b', source):
+                raise SystemExit(f"Could not make next_path const-correct in {path}")
+        
+        if not checked:
+            raise SystemExit(f"Could not locate libbpf.c containing next_path = strchr(s, ':') under {root}")
+        if not all(re.search(r'(?m)^\s*const\s+char\s*\*\s*next_path\b', p.read_text()) for p in checked):
+            raise SystemExit("libbpf next_path const-correctness verification failed")
+        for path in patched:
+            print(f"Applied const-correct next_path declaration: {path}")
+        if not patched:
+            print("libbpf next_path declaration is already const-correct")
         PY_LIBBPF_CONST_FIX
-                else
-                  echo "::error::libbpf source not found: $LIBBPF_SOURCE"
-                  exit 1
-                fi
         # Ensure SukiSU's preinit runner dependency is absolute. With O=out,
         # a relative KSU_KERNEL_DIR can resolve runner.c outside the source tree.
         KSU_KERNEL_BUILD_FILE="$COMMON_KERNEL_FOLDER/drivers/kernelsu/Kbuild"
