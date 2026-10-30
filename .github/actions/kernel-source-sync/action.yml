@@ -44,6 +44,7 @@ runs:
         import os, shutil
         import time
         import glob
+        import tempfile
         from concurrent.futures import ThreadPoolExecutor
         import requests
         
@@ -95,10 +96,9 @@ runs:
             start_time = time.time()
             MAX_ATTEMPTS = 3
             for attempt in range(1, MAX_ATTEMPTS + 1):
-                shm_workspace = f"/dev/shm/sync_{hash(name) % 1000000}"
-                if os.path.exists(shm_workspace):
-                    shutil.rmtree(shm_workspace, ignore_errors=True)
-                os.makedirs(shm_workspace, exist_ok=True)
+                # Give every concurrent project/attempt its own directory. A hash-based
+                # shared name could let one worker remove another worker's active download.
+                shm_workspace = tempfile.mkdtemp(prefix="kernel-sync-", dir="/dev/shm")
                 
                 print(f"Syncing: {name} -> {path}")
                 print(f"  [PENDING] {name}")
@@ -293,3 +293,21 @@ runs:
         seconds = total_duration % 60
         print(f"Kernel Sync completed in {minutes}m {seconds:.2f}s")
         print("::endgroup::")
+    - name: 🧪 Experimental OP13R 6.1.157 ACK Rebase
+      if: ${{ endsWith(env.OP_MANIFEST, 'oneplus_13r_6.1.157_exp_w.xml') }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        SCRIPT="$GITHUB_WORKSPACE/configs/experimental_op13r_6.1.157_rebase.sh"
+        [ -f "$SCRIPT" ] || { echo "::error::Experimental OP13R 6.1.157 rebase script not found: $SCRIPT"; exit 1; }
+        chmod +x "$SCRIPT"
+        EXPERIMENTAL_COMMON_KERNEL_FOLDER="$GITHUB_WORKSPACE/${OP_MODEL}/kernel_platform/common" \
+          bash "$SCRIPT"
+
+    - name: 📋 Upload OP13R 6.1.157 Rebase Diagnostics
+      if: ${{ always() && endsWith(env.OP_MANIFEST, 'oneplus_13r_6.1.157_exp_w.xml') }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: op13r-6.1.157-rebase-diagnostics
+        path: ${{ github.workspace }}/op13r-6.1.157-rebase-diagnostics
+        if-no-files-found: ignore
