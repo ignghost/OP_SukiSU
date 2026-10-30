@@ -1810,12 +1810,31 @@ runs:
         # Provide the libxml2 runtime required by the downloaded host linker.
         if ! ldconfig -p 2>/dev/null | grep -q 'libxml2\.so\.2'; then
           sudo apt-get update
-          sudo apt-get install -y libxml2
+
+          installed=false
+          for package in libxml2t64 libxml2; do
+            candidate="$(apt-cache policy "$package" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
+            if [ -n "$candidate" ] && [ "$candidate" != "(none)" ]; then
+              sudo apt-get install -y "$package"
+              installed=true
+              break
+            fi
+          done
+
+          if [ "$installed" != true ]; then
+            echo "No APT candidate found for libxml2t64 or libxml2." >&2
+            apt-cache search '^libxml2' >&2 || true
+            echo "Configured APT sources:" >&2
+            grep -RhE '^(deb |Types:|URIs:|Suites:|Components:)' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null >&2 || true
+            exit 1
+          fi
         fi
-        ldconfig -p 2>/dev/null | grep -q 'libxml2\.so\.2' || {
-          echo "libxml2.so.2 is still unavailable after installation" >&2
+
+        if ! ldconfig -p 2>/dev/null | grep -q 'libxml2\.so\.2'; then
+          echo "libxml2.so.2 is still unavailable after installation." >&2
+          find /usr/lib /lib /usr/local/lib /opt -name 'libxml2.so*' -print 2>/dev/null | head -50 >&2 || true
           exit 1
-        }
+        fi
         echo "::group::Build kernel with ccache optimization"
         
         cd "$COMMON_KERNEL_FOLDER"
