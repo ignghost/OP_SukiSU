@@ -2080,9 +2080,9 @@ runs:
         
         make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" O="$OUT" gki_defconfig
         if [ "$OP_BRANCH" = "oneplus/mt6835_b_16.0_n6" ]; then
-       echo "Fixing OP-N6 built-in NFC dependency on OPLUS project symbols"
-       scripts/config --file "$OUT/.config" --enable OPLUS_FEATURE_OPROJECT
-       fi
+  echo "Fixing OP-N6 built-in NFC dependency on OPLUS project symbols"
+  scripts/config --file "$OUT/.config" --enable OPLUS_FEATURE_OPROJECT
+fi
         scripts/config --file "$OUT/.config" --set-str LOCALVERSION "${CUSTOM_LOCALVERSION}"
         # The complete -g<hash> suffix is already embedded above; do not let
         # the kernel build system append a second or missing Git suffix.
