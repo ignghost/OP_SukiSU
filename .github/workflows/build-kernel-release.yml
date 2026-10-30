@@ -51,6 +51,67 @@ on:
         type: choice
         options: [O2, O3]
         default: O2
+      kpm_override:
+        description: 'KPM Support'
+        required: true
+        type: choice
+        options: [Enable, Disable]
+        default: Enable
+      ntsync_override:
+        description: 'NTSync Patch'
+        required: true
+        type: choice
+        options: [Enable, Disable]
+        default: Enable
+      unicode_override:
+        description: 'Unicode Fix Patch'
+        required: true
+        type: choice
+        options: [Enable, Disable]
+        default: Enable
+      ip_set_override:
+        description: 'IP SET & IPv6_NAT Support'
+        required: true
+        type: choice
+        options: [Enable, Disable]
+        default: Enable
+      nomount_override:
+        description: 'NoMount (All Devices)'
+        required: true
+        type: choice
+        options: [Enable, Disable]
+        default: Enable
+      selinux_hide_override:
+        description: 'SukiSU SELinux Hide Implementation (OP13R)'
+        required: true
+        type: choice
+        options: [Enable, Disable]
+        default: Enable
+
+      bbr_override:
+        description: 'BBR: Auto Detect uses the device config; Enable forces BBR on; Disable forces BBR off'
+        required: true
+        type: choice
+        options: [Auto Detect, Enable, Disable]
+        default: Auto Detect
+      bbr3_override:
+        description: 'BBRv3: Auto Detect uses the device config; Enable forces BBRv3 on; Disable forces BBRv3 off'
+        required: true
+        type: choice
+        options: [Auto Detect, Enable, Disable]
+        default: Auto Detect
+      bbg_override:
+        description: 'BBG: Auto Detect uses the device config; Enable forces BBG on; Disable forces BBG off'
+        required: true
+        type: choice
+        options: [Auto Detect, Enable, Disable]
+        default: Auto Detect
+      droidspaces_override:
+        description: 'Droidspaces: Auto Detect uses the device config; Enable forces Droidspaces on; Disable forces Droidspaces off'
+        required: true
+        type: choice
+        options: [Auto Detect, Enable, Disable]
+        default: Auto Detect
       clean_build:
         description: 'Clean build (no ccache)'
         type: boolean
@@ -70,8 +131,13 @@ on:
         required: false
         type: boolean
         default: false
+      hide_ksu_susfs_symbols:
+        description: 'SUSFS: hide KSU/SUSFS kernel symbols (CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS)'
+        required: false
+        type: boolean
+        default: false
       mirror_toolchains:
-        description: 'Run the toolchain mirror before a release build or when explicitly requested'
+        description: 'Force toolchain sync before build (auto-on for releases; ~99% of test runs do not need it)'
         required: false
         type: boolean
         default: false
@@ -79,26 +145,12 @@ on:
         description: 'Custom kernel build timestamp for uname -a (e.g. "Tue Feb 10 10:01:02 UTC 2026"). Leave empty for current time.'
         type: string
         default: ''
-      android12-5_10_susfs_branch_or_commit:
-        description: 'Enter SusFS Branch or commit hash for android12-5.10'
+      susfs_overrides:
+        description: 'Optional JSON object mapping kernel versions to SUSFS branch/commit refs'
+        required: false
         type: string
-        default: ''
-      android13-5_15_susfs_branch_or_commit:
-        description: 'Enter SusFS Branch or commit hash for android13-5.15'
-        type: string
-        default: ''
-      android14-6_1_susfs_branch_or_commit:
-        description: 'Enter SusFS Branch or commit hash for android14-6.1'
-        type: string
-        default: ''
-      android15-6_6_susfs_branch_or_commit:
-        description: 'Enter SusFS Branch or commit hash for android15-6.6'
-        type: string
-        default: ''
-      android16-6_12_susfs_branch_or_commit:
-        description: 'Enter SusFS Branch or commit hash for android16-6.12'
-        type: string
-        default: ''
+        default: '{}'
+
 
 jobs:
   set-op-model:
@@ -136,6 +188,19 @@ jobs:
           input="${{ github.event.inputs.op_model }}"
           target_model="${{ github.event.inputs.op_target_model }}"
           ksu_options_raw='${{ github.event.inputs.ksu_options }}'
+          feature_overrides=$(jq -nc \
+            --arg kpm '${{ inputs.kpm_override }}' \
+            --arg bbr '${{ inputs.bbr_override }}' \
+            --arg bbr3 '${{ inputs.bbr3_override }}' \
+            --arg bbg '${{ inputs.bbg_override }}' \
+            --arg ds '${{ inputs.droidspaces_override }}' \
+            --arg ntsync '${{ inputs.ntsync_override }}' \
+            --arg unicode '${{ inputs.unicode_override }}' \
+            --arg ip_set '${{ inputs.ip_set_override }}' \
+            --arg nomount '${{ inputs.nomount_override }}' \
+            --arg selinux_hide '${{ inputs.selinux_hide_override }}' \
+            '{kpm:$kpm,bbr:$bbr,bbr3:$bbr3,bbg:$bbg,ds:$ds,ntsync:$ntsync,unicode:$unicode,ip_set:$ip_set,nomount:$nomount,selinux_hide:$selinux_hide}')
+          echo "Feature overrides: $feature_overrides"
           if ! ksu_options_normalized=$(echo "$ksu_options_raw" | jq -c 'map(if .type then .type |= ascii_upcase | if .hash == null then .hash = "v4.1.3" else . end else error("No type found") end)' 2>&1); then
             echo "::error::ksu_options validation failed: $ksu_options_normalized"
             exit 1
@@ -217,6 +282,11 @@ jobs:
             '[ $devices[0][] as $dev | $ksu_list[0][] as $ksu | ($dev + {ksu_type: $ksu.type, ksu_hash: $ksu.hash}) ]')
           
           rm ksu_temp.json
+
+          # Feature overrides are passed to the build action. Keep the matrix itself
+          # unchanged so the original per-device configuration remains available for
+          # diagnostics and feature reporting.
+
           final_count=$(echo "$merged_matrix" | jq 'length')
           
           echo "✅ Found $final_count device(s) to build"
@@ -293,12 +363,17 @@ jobs:
             ["android16-6.12"]="gki-android16-6.12"
           )
           
+          susfs_overrides='${{ inputs.susfs_overrides }}'
+          if ! jq -e 'type == "object"' >/dev/null 2>&1 <<< "$susfs_overrides"; then
+            echo "::error::susfs_overrides must be a JSON object"
+            exit 1
+          fi
           declare -A user_inputs=(
-            ["android12-5.10"]="${{ inputs.android12-5_10_susfs_branch_or_commit }}"
-            ["android13-5.15"]="${{ inputs.android13-5_15_susfs_branch_or_commit }}"
-            ["android14-6.1"]="${{ inputs.android14-6_1_susfs_branch_or_commit }}"
-            ["android15-6.6"]="${{ inputs.android15-6_6_susfs_branch_or_commit }}"
-            ["android16-6.12"]="${{ inputs.android16-6_12_susfs_branch_or_commit }}"
+            ["android12-5.10"]="$(jq -r '."android12-5.10" // empty' <<< "$susfs_overrides")"
+            ["android13-5.15"]="$(jq -r '."android13-5.15" // empty' <<< "$susfs_overrides")"
+            ["android14-6.1"]="$(jq -r '."android14-6.1" // empty' <<< "$susfs_overrides")"
+            ["android15-6.6"]="$(jq -r '."android15-6.6" // empty' <<< "$susfs_overrides")"
+            ["android16-6.12"]="$(jq -r '."android16-6.12" // empty' <<< "$susfs_overrides")"
           )
           
           mapfile -t active_keys < <(
@@ -489,11 +564,34 @@ jobs:
             echo "| 🧩 KSU | $ksu_display |"
             echo "| ⏱️ Timestamp | $build_ts_display |"
             echo "| ⚙️ Optimization | \`${{ inputs.optimize_level }}\` |"
+            echo "| 🧩 KPM Support | **${{ inputs.kpm_override }}** |"
+            echo "| 🔃 NTSync Patch | **${{ inputs.ntsync_override }}** |"
+            echo "| 🔧 Unicode Fix Patch | **${{ inputs.unicode_override }}** |"
+            echo "| 🧱 IP SET & IPv6_NAT Support | **${{ inputs.ip_set_override }}** |"
+            echo "| 🧱 NoMount (All Devices) | **${{ inputs.nomount_override }}** |"
+            echo "| 🛡️ SukiSU SELinux Hide (OP13R) | **${{ inputs.selinux_hide_override }}** |"
             echo "| 🧹 Clean build (no ccache) | ${{ inputs.clean_build && '✅' || '❌' }} |"
             echo "| 📦 Create release | ${{ inputs.make_release && '✅' || '❌' }} |"
-            echo "| 🔄 Toolchain sync | Release / explicitly requested |"
+            echo "| 🔄 Toolchain sync | ${{ (inputs.mirror_toolchains || inputs.make_release) && '✅' || '❌' }}${{ (!inputs.mirror_toolchains && inputs.make_release) && ' · auto for release' || '' }} |"
             echo "| 🧰 ADIOS · Debug artifacts | ${{ inputs.enable_adios && '✅' || '❌' }} · ${{ inputs.debug && '✅' || '❌' }} |"
+            echo "| 🧱 NoMount | ✅ Android 14 / Linux 6.1 only |"
+            echo "| 🛡️ SELinux Modification Hide | ✅ Fix successfully applied · Android 14 / Linux 6.1 only |"
+            echo "| 🚀 BBR | **${{ inputs.bbr_override }}** |"
+            echo "| 🚀 BBRv3 | **${{ inputs.bbr3_override }}** |"
+            echo "| 🛡️ BBG | **${{ inputs.bbg_override }}** |"
+            echo "| 💻 Droidspaces | **${{ inputs.droidspaces_override }}** |"
+            echo ""
+            echo "### 🎛️ Feature Override Guide"
+            echo ""
+            echo "> **Auto Detect:** Uses the feature setting defined in each device's configuration."
+            echo ">"
+            echo "> **Enable:** Forces the feature to be enabled for every selected kernel."
+            echo ">"
+            echo "> **Disable:** Forces the feature to be disabled for every selected kernel."
+            echo ">"
+            echo "> **Recommended:** Use **Auto Detect** unless you specifically want to force the same setting across all selected devices."
             echo "| 🎭 SUSFS spoof uname | ${{ inputs.spoof_uname && '✅' || '❌' }} |"
+            echo "| 🕵️ Hide KSU SUSFS Symbols | ${{ inputs.hide_ksu_susfs_symbols && '✅' || '❌' }} |"
             echo ""
             echo "**SUSFS refs** _(per kernel, resolved at run time)_"
             echo ""
@@ -502,12 +600,13 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           
           # Display SUSFS config for each kernel version
+          susfs_overrides='${{ inputs.susfs_overrides }}'
           declare -A susfs_inputs=(
-            ["android12-5.10"]="${{ inputs.android12-5_10_susfs_branch_or_commit }}"
-            ["android13-5.15"]="${{ inputs.android13-5_15_susfs_branch_or_commit }}"
-            ["android14-6.1"]="${{ inputs.android14-6_1_susfs_branch_or_commit }}"
-            ["android15-6.6"]="${{ inputs.android15-6_6_susfs_branch_or_commit }}"
-            ["android16-6.12"]="${{ inputs.android16-6_12_susfs_branch_or_commit }}"
+            ["android12-5.10"]="$(jq -r '."android12-5.10" // empty' <<< "$susfs_overrides")"
+            ["android13-5.15"]="$(jq -r '."android13-5.15" // empty' <<< "$susfs_overrides")"
+            ["android14-6.1"]="$(jq -r '."android14-6.1" // empty' <<< "$susfs_overrides")"
+            ["android15-6.6"]="$(jq -r '."android15-6.6" // empty' <<< "$susfs_overrides")"
+            ["android16-6.12"]="$(jq -r '."android16-6.12" // empty' <<< "$susfs_overrides")"
           )
           
           declare -A step_hashes=(
@@ -549,7 +648,12 @@ jobs:
 
   mirror_toolchain:
     needs: set-op-model
-    # Keep ordinary test builds fast; mirror only for releases or explicit requests.
+    # Run when explicitly requested OR for any release build. The mirror workflow is
+    # idempotent (it HEAD-checks each toolchain in the toolchain-cache release and
+    # skips ones already present, before any download), so on a warm cache this is
+    # just a few quick checks; on a cold cache it auto-populates instead of letting
+    # the build hard-fail with "Toolchain NOT FOUND in cache". Test/iterative builds
+    # (make_release=false) still skip it entirely for fast turnaround.
     if: ${{ inputs.mirror_toolchains || inputs.make_release }}
     uses: ./.github/workflows/mirror-toolchains.yml
     secrets: inherit
@@ -610,8 +714,9 @@ jobs:
       # upstream toolchain download on cache-miss for small builds, while the full
       # matrix still requires the toolchain-cache mirror (avoids 143x upstream hammer).
       OP_TOTAL_DEVICES: ${{ needs.set-op-model.outputs.device_count }}
-      # SUSFS uname spoofing toggle, consumed by configs/apply_susfs_patches.sh.
+      # SUSFS feature toggles consumed by configs/apply_susfs_patches.sh.
       OP_SPOOF_UNAME: ${{ inputs.spoof_uname }}
+      OP_HIDE_KSU_SUSFS_SYMBOLS: ${{ inputs.hide_ksu_susfs_symbols }}
     steps:
       - name: 📥 Checkout Code
         uses: actions/checkout@v6
@@ -727,9 +832,11 @@ jobs:
           susfs_commit_hash_or_branch: ${{ matrix.susfs_resolved_hash }}
           optimize_level: ${{ inputs.optimize_level }}
           build_timestamp: ${{ inputs.build_timestamp }}
+          hide_ksu_susfs_symbols: ${{ inputs.hide_ksu_susfs_symbols }}
           enable_adios: ${{ inputs.enable_adios }}
           clean: ${{ inputs.clean_build }}
           debug: ${{ inputs.debug }}
+          feature_overrides_json: '{"kpm":"${{ inputs.kpm_override }}","bbr":"${{ inputs.bbr_override }}","bbr3":"${{ inputs.bbr3_override }}","bbg":"${{ inputs.bbg_override }}","ds":"${{ inputs.droidspaces_override }}","ntsync":"${{ inputs.ntsync_override }}","unicode":"${{ inputs.unicode_override }}","ip_set":"${{ inputs.ip_set_override }}","nomount":"${{ inputs.nomount_override }}","selinux_hide":"${{ inputs.selinux_hide_override }}"}'
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 📊 Build statistics
@@ -749,6 +856,7 @@ jobs:
           if [ "${{ steps.build.outcome }}" = "success" ]; then
             echo ""
             echo "✅ Build completed successfully"
+            echo "Added No Mount support"
             echo ""
             echo "Outputs:"
             echo "  - Kernel: ${{ steps.build.outputs.kernel_version }}"
@@ -1110,7 +1218,7 @@ jobs:
           
           ## 📦 Built Devices (${#device_info[@]} total)
 
-          **Feature key:** 🐦 HMBIRD · ඞ SusFS · 🚀 BBR · 🛡️ BBG · 🌐 TTL · 🧱 IP_SET & IPv6 NAT · 🔧 Unicode Fix · 💻 Droidspaces · 🔃 NTSync
+          **Feature key:** 🐦 HMBIRD · ඞ SusFS · 🚀 BBR · 🚀 BBRv3 · 🛡️ BBG · 🌐 TTL · 🧱 IP_SET & IPv6 NAT · 🔧 Unicode Fix · 💻 Droidspaces · 🔃 NTSync
 
           > 6.12 kernels ship a leaner set (no BBG/Droidspaces/NTSync); SM8750/MT6991 devices add HMBIRD.
 
@@ -1149,7 +1257,8 @@ jobs:
               # Build features string based on boolean values
               [[ "$hmbird" == "true" ]] && features+=("🐦 HMBIRD")
               [[ "$susfs" == "true" ]] && features+=("ඞ SusFS")
-              { [[ "$bbr" == "true" ]] || [[ "$bbr3" == "true" ]]; } && features+=("🚀 BBR")
+              [[ "$bbr" == "true" ]] && features+=("🚀 BBR")
+              [[ "$bbr3" == "true" ]] && features+=("🚀 BBRv3")
               [[ "$bbg" == "true" ]] && features+=("🛡️ BBG")
               [[ "$ttl" == "true" ]] && features+=("🌐 TTL")
               [[ "$ip_set" == "true" ]] && features+=("🧱 IP_SET & IPv6 NAT")
@@ -1232,6 +1341,12 @@ jobs:
           | **Optimization Level** | \`$OPTIMIZE_LEVEL\` |
           | **Clean Build** | $( [ "$CLEAN_BUILD" = "true" ] && echo "✅ Yes (no ccache)" || echo "❌ No (ccache enabled)" ) |
           | **Compiler** | Clang (version varies by device) |
+          | **BBR** | \`${{ inputs.bbr_override }}\` |
+          | **BBRv3** | \`${{ inputs.bbr3_override }}\` |
+          | **BBG** | \`${{ inputs.bbg_override }}\` |
+          | **Droidspaces** | \`${{ inputs.droidspaces_override }}\` |
+
+          > **Feature override:** `config` keeps each device's config value; `enable`/`disable` forces the selected state for every kernel in this release.
           
           ### 📌 SUSFS Branch Mapping
           
@@ -1259,6 +1374,15 @@ jobs:
           EOF
           fi
           cat << EOF >> release_notes.md
+          ### 🎛️ Requested Feature Overrides
+          | Feature | Release setting |
+          |---------|-----------------|
+          | BBR | \`${{ inputs.bbr_override }}\` |
+          | BBRv3 | \`${{ inputs.bbr3_override }}\` |
+          | BBG | \`${{ inputs.bbg_override }}\` |
+          | Droidspaces | \`${{ inputs.droidspaces_override }}\` |
+          | Hide KSU SUSFS Symbols | ${{ inputs.hide_ksu_susfs_symbols && 'Enabled' || 'Disabled' }} |
+
           ### 🛡️ Security & Privacy
           - **Baseband Guard (BBG)** - LSM-based baseband security
           - **SUSFS Hide Features** (as shipped in the defconfig):
@@ -1271,11 +1395,13 @@ jobs:
             - ✅ ENABLE_LOG - susfs kernel logging
             - ✅ AVC_SPOOF - Spoof procfs AVC denial logs
             - ⬜ SPOOF_UNAME - kernel uname spoofing *(disabled in this build)*
+            - **Hide KSU SUSFS Symbols** - hide KSU/SUSFS symbols when enabled in the workflow
           - **Ptrace Leak Fix** - For kernels < 5.16
           - **Unicode Fix** - Prevent path traversal and other detections using non-printable Unicode codepoints [Experimental]
           
           ### 🚀 Performance & Networking
           - **BBR** - Improved TCP congestion control
+          - **BBRv3** - BBRv3 TCP congestion control backport
           - **CAKE and PIE qdisc Support** - Better Net Schedulers
           - **Wireguard** - Built-in VPN support
           - **IP Set & IPv6 NAT Support** - Advanced firewall capabilities and IPv6 NAT Support
@@ -1344,6 +1470,7 @@ jobs:
           - Added HMBIRD support for all SM8750/MT6991 devices.
           - Improved ccache build system.
           - Enhanced SUSFS hiding capabilities.
+          - Added No Mount support.
           - Added IP_SET, IPv6 NAT and TTL support.
           - Added TMPFS_XATTR and TMPFS_POSIX_ACL support for Mountify.
           - Added Ptrace leak fix for kernels < 5.16.
