@@ -1837,13 +1837,14 @@ runs:
                 raise SystemExit(f"Could not make next_path const-correct in {path}")
         
         if not checked:
-            raise SystemExit(f"Could not locate libbpf.c containing next_path = strchr(s, ':') under {root}")
-        if not all(re.search(r'(?m)^\s*const\s+char\s*\*\s*next_path\b', p.read_text()) for p in checked):
-            raise SystemExit("libbpf next_path const-correctness verification failed")
-        for path in patched:
-            print(f"Applied const-correct next_path declaration: {path}")
-        if not patched:
-            print("libbpf next_path declaration is already const-correct")
+            print(f"No next_path = strchr(s, ':') pattern in libbpf.c under {root}; skipping this version-specific fix")
+        else:
+            if not all(re.search(r'(?m)^\s*const\s+char\s*\*\s*next_path\b', p.read_text()) for p in checked):
+                raise SystemExit("libbpf next_path const-correctness verification failed")
+            for path in patched:
+                print(f"Applied const-correct next_path declaration: {path}")
+            if not patched:
+                print("libbpf next_path declaration is already const-correct")
         PY_LIBBPF_CONST_FIX
         python3 - "$COMMON_KERNEL_FOLDER/tools" <<'PY_LIBBPF_LLVM_CONST_FIX'
         from pathlib import Path
@@ -1894,11 +1895,12 @@ runs:
                 path.write_text(updated_source)
 
         if not checked:
-            raise SystemExit(f'Could not locate libbpf.c containing res = strstr(sym_name, ".llvm.") under {root}')
-        for path in sorted(set(changed)):
-            print(f"Applied const-correct res declaration: {path}")
-        if not changed:
-            print("libbpf .llvm. res declaration is already const-correct")
+            print(f'No res = strstr(sym_name, ".llvm.") pattern in libbpf.c under {root}; skipping this version-specific fix')
+        else:
+            for path in sorted(set(changed)):
+                print(f"Applied const-correct res declaration: {path}")
+            if not changed:
+                print("libbpf .llvm. res declaration is already const-correct")
         PY_LIBBPF_LLVM_CONST_FIX
         # Ensure SukiSU's preinit runner dependency is absolute. With O=out,
         # a relative KSU_KERNEL_DIR can resolve runner.c outside the source tree.
