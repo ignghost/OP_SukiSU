@@ -1831,8 +1831,13 @@ runs:
         fi
 
         if ! ldconfig -p 2>/dev/null | grep -q 'libxml2\.so\.2'; then
-          echo "libxml2.so.2 is still unavailable after installation." >&2
-          find /usr/lib /lib /usr/local/lib /opt -name 'libxml2.so*' -print 2>/dev/null | head -50 >&2 || true
+          sudo apt-get update
+          sudo apt-get install -y libxml2t64
+        fi
+
+        if ! ldconfig -p 2>/dev/null | grep -q 'libxml2\.so\.2'; then
+          echo "Required libxml2.so.2 was not installed." >&2
+          ldconfig -p 2>/dev/null | grep -i libxml2 >&2 || true
           exit 1
         fi
         echo "::group::Build kernel with ccache optimization"
