@@ -2079,11 +2079,7 @@ runs:
         echo "============================================"
         
         make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" O="$OUT" gki_defconfig
-
-        if [ "$OP_BRANCH" = "oneplus/mt6835_b_16.0_n6" ]; then
-  echo "Fixing OP-N6 built-in NFC dependency on OPLUS project symbols"
-  scripts/config --file "$OUT/.config" --enable OPLUS_FEATURE_OPROJECT
-fi
+        
         scripts/config --file "$OUT/.config" --set-str LOCALVERSION "${CUSTOM_LOCALVERSION}"
         # The complete -g<hash> suffix is already embedded above; do not let
         # the kernel build system append a second or missing Git suffix.
@@ -2135,7 +2131,14 @@ fi
         done
 
         make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" O="$OUT" olddefconfig
-        
+        if [ "$OP_BRANCH" = "oneplus/mt6835_b_16.0_n6" ]; then
+  if ! grep -qx 'CONFIG_OPLUS_FEATURE_OPROJECT=y' "$OUT/.config"; then
+    echo "::error::OP-N6 requires CONFIG_OPLUS_FEATURE_OPROJECT=y, but olddefconfig did not retain it."
+    grep -E '^# CONFIG_OPLUS_FEATURE_OPROJECT is not set$|^CONFIG_OPLUS_FEATURE_OPROJECT=' "$OUT/.config" || true
+    exit 1
+  fi
+  echo "Verified: CONFIG_OPLUS_FEATURE_OPROJECT=y (built-in)"
+fi
         KCFLAGS="$KCFLAGS -Wno-error -pipe ${KCFLAGS_EXTRA}"
         KCPPFLAGS="$KCPPFLAGS -DCONFIG_OPTIMIZE_INLINING"
         
