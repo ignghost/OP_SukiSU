@@ -1806,6 +1806,16 @@ runs:
         CCACHE_EXTRAFILES: "$COMMON_KERNEL_FOLDER/out/kernel/config_data.gz"
       run: |
         set -euo pipefail
+
+        # Provide the libxml2 runtime required by the downloaded host linker.
+        if ! ldconfig -p 2>/dev/null | grep -q 'libxml2\.so\.2'; then
+          sudo apt-get update
+          sudo apt-get install -y libxml2
+        fi
+        ldconfig -p 2>/dev/null | grep -q 'libxml2\.so\.2' || {
+          echo "libxml2.so.2 is still unavailable after installation" >&2
+          exit 1
+        }
         echo "::group::Build kernel with ccache optimization"
         
         cd "$COMMON_KERNEL_FOLDER"
