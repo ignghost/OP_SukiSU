@@ -2079,6 +2079,7 @@ runs:
         echo "============================================"
         
         make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" O="$OUT" gki_defconfig
+
         if [ "$OP_BRANCH" = "oneplus/mt6835_b_16.0_n6" ]; then
   echo "Fixing OP-N6 built-in NFC dependency on OPLUS project symbols"
   scripts/config --file "$OUT/.config" --enable OPLUS_FEATURE_OPROJECT
