@@ -2130,6 +2130,11 @@ runs:
           scripts/config --file "$OUT/.config" -d "$sym" 2>/dev/null || true
         done
 
+        if [ "$OP_MODEL" = "OP-N6" ] || [ "$OP_MODEL" = "OP-N6X" ]; then
+          scripts/config --file "$OUT/.config" -d OPLUS_NFC
+          echo "Disabled OPLUS_NFC for ${OP_MODEL}: standalone NFC helper requires vendor project-info symbols unavailable in this GKI build."
+        fi
+
         make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" O="$OUT" olddefconfig
         
         make LD="$COMMON_KERNEL_FOLDER/ld-wrapper" HOSTLD="$COMMON_KERNEL_FOLDER/ld-wrapper" O="$OUT" olddefconfig
