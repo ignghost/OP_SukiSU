@@ -71,7 +71,7 @@ outputs:
     description: 'SukiSU Variant'
     value: ${{ steps.save_metadata.outputs.ksu_type }}
   susfs_version:
-    description: 'SUSFS version string (v2.1.0, v2.2.0, or v2.3.0)'
+    description: 'SUSFS version string (v2.1.0, v2.2.0, v2.3.0, or v2.4.0)'
     value: ${{ steps.save_metadata.outputs.susfs_version }}
   build_timestamp:
     description: 'Effective kernel build timestamp used in uname -a'
@@ -1094,12 +1094,12 @@ runs:
         echo "NOMOUNT_APPLIED=true" >> "$GITHUB_ENV"
         echo "::endgroup::"
 
-    - name: Sanitize SukiSU v2.3.0 compatibility files
+    - name: Sanitize SukiSU v2.3.0/v2.4.0 compatibility files
       shell: bash
-      if: ${{ env.OP_SUSFS == 'true' && env.SUSVER == 'v2.3.0' }}
+      if: ${{ env.OP_SUSFS == 'true' && (env.SUSVER == 'v2.3.0' || env.SUSVER == 'v2.4.0') }}
       run: |
         set -euo pipefail
-        echo "::group::Sanitize SukiSU v2.3.0 compatibility files"
+        echo "::group::Sanitize SukiSU v2.3.0/v2.4.0 compatibility files"
 
         python3 - <<'PY2'
         from pathlib import Path
