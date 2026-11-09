@@ -38,11 +38,11 @@ echo "$susfs_version" >> "${ARTIFACTS_FOLDER}/${OP_MODEL}_${OP_OS_VERSION}.txt"
 echo "SusFS Version: $susfs_version"
 
 case "$susfs_version" in
-  v2.1.0|v2.2.0|v2.3.0)
+  v2.1.0|v2.2.0|v2.3.0|v2.4.0)
     echo "Supported SUSFS version detected: $susfs_version"
     ;;
   *)
-    echo "::error::This workflow step supports SUSFS v2.1.0, v2.2.0, and v2.3.0. Detected: $susfs_version"
+    echo "::error::This workflow step supports SUSFS v2.1.0, v2.2.0, v2.3.0, and v2.4.0. Detected: $susfs_version"
     exit 1
     ;;
 esac
@@ -1497,11 +1497,11 @@ fi
 
 fix_sukisu_init_c               "kernel/core/init.c"
 
-# SUSFS v2.3.0 removes the legacy app-profile init path from kernelsu_init().
+# SUSFS v2.3.0 and later remove the legacy app-profile init path from kernelsu_init().
 # Some SukiSU revisions retain the old call after the SUSFS hunk is applied,
-# but the corresponding declaration is intentionally absent.  Do not restore
+# but the corresponding declaration is intentionally absent. Do not restore
 # the obsolete call; remove it from both the primary KSU tree and mirror.
-if [ "${SUSVER:-}" = "v2.3.0" ]; then
+if [[ "${SUSVER:-}" == "v2.3.0" || "${SUSVER:-}" == "v2.4.0" ]]; then
   sed -i '/^[[:space:]]*ksu_app_profile_init[[:space:]]*();[[:space:]]*$/d' kernel/core/init.c 2>/dev/null || true
 fi
 ensure_susfs_init_call          "kernel/core/init.c"
@@ -1565,7 +1565,7 @@ fi
 
 fix_sukisu_init_c               "drivers/kernelsu/core/init.c"
 
-if [ "${SUSVER:-}" = "v2.3.0" ]; then
+if [[ "${SUSVER:-}" == "v2.3.0" || "${SUSVER:-}" == "v2.4.0" ]]; then
   sed -i '/^[[:space:]]*ksu_app_profile_init[[:space:]]*();[[:space:]]*$/d' drivers/kernelsu/core/init.c 2>/dev/null || true
 fi
 ensure_susfs_init_call          "drivers/kernelsu/core/init.c"
