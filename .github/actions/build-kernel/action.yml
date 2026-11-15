@@ -139,6 +139,11 @@ runs:
           exit 1
         fi
         for feature in kpm bbr bbr3 bbg ds ntsync unicode ip_set nomount selinux_hide; do
+          if [ "$feature" = "selinux_hide" ]; then
+            echo "OP_SELINUX_HIDE=true" >> "$GITHUB_ENV"
+            echo "SELinux Hide: mandatory (enabled)"
+            continue
+          fi
           value=$(jq -r --arg f "$feature" '.[$f] // "Auto Detect"' <<< "$overrides")
           if [ "$feature" = "kpm" ]; then
             case "$value" in
@@ -1066,7 +1071,7 @@ runs:
 
     - name: Apply SELinux Modification Hide Script
       shell: bash
-      if: ${{ inputs.ksu_type == 'SUKISU' && env.OP_SELINUX_HIDE == 'true' }}
+      if: ${{ env.OP_SUSFS == 'true' }}
       env:
         ANDROID_VER_LOCAL: ${{ env.ANDROID_VER }}
         KERNEL_VER_LOCAL: ${{ env.KERNEL_VER }}
