@@ -67,12 +67,6 @@ on:
         type: choice
         options: [Enable, Disable]
         default: Enable
-      selinux_hide_override:
-        description: 'SELinux Hide Implementation (Enable For Build Success)'
-        required: true
-        type: choice
-        options: [Enable, Disable]
-        default: Enable
 
       bbr_features_override:
         description: 'BBR + BBRv3 + BBG'
@@ -175,11 +169,10 @@ jobs:
             --arg bbr_features '${{ inputs.bbr_features_override }}' \
             --arg misc_features '${{ inputs.misc_features_override }}' \
             --arg nomount '${{ inputs.nomount_override }}' \
-            --arg selinux_hide '${{ inputs.selinux_hide_override }}' \
             'def v: if . == "Auto Detect" then "config" elif . == "Enable" then "enable" elif . == "Disable" then "disable" else . end;
              {kpm:$kpm,bbr:($bbr_features|v),bbr3:($bbr_features|v),bbg:($bbr_features|v),
               ds:$misc_features,ntsync:$misc_features,unicode:$misc_features,ip_set:$misc_features,
-              nomount:$nomount,selinux_hide:$selinux_hide}')
+              nomount:$nomount,selinux_hide:"Enable"}')
           echo "Feature overrides: $feature_overrides"
           if ! ksu_options_normalized=$(echo "$ksu_options_raw" | jq -c 'map(if .type then .type |= ascii_upcase | if .hash == null then .hash = "v4.1.3" else . end else error("No type found") end)' 2>&1); then
             echo "::error::ksu_options validation failed: $ksu_options_normalized"
@@ -524,7 +517,7 @@ jobs:
             echo "| 🧩 KPM Support | **${{ inputs.kpm_override }}** |"
             echo "| 🧩 Droidspaces + NTSync + Unicode + IP SET/IPv6_NAT | **${{ inputs.misc_features_override }}** |"
             echo "| 🧱 NoMount Implementation | **${{ inputs.nomount_override }}** |"
-            echo "| 🛡️ SELinux Modification Hide | **${{ inputs.selinux_hide_override }}** |"
+            echo "| 🛡️ SELinux Modification Hide | **Mandatory (automatic)** |"
             echo "| 🧹 Clean build (no ccache) | ${{ inputs.clean_build && '✅' || '❌' }} |"
             echo "| 📦 Create release | ${{ inputs.make_release && '✅' || '❌' }} |"
             echo "| 🔄 Toolchain sync | ${{ (inputs.mirror_toolchains || inputs.make_release) && '✅' || '❌' }}${{ (!inputs.mirror_toolchains && inputs.make_release) && ' · auto for release' || '' }} |"
@@ -762,7 +755,7 @@ jobs:
           enable_adios: ${{ inputs.enable_adios }}
           clean: ${{ inputs.clean_build }}
           debug: ${{ inputs.debug }}
-          feature_overrides_json: '{"kpm":"${{ inputs.kpm_override }}","bbr":"${{ inputs.bbr_features_override }}","bbr3":"${{ inputs.bbr_features_override }}","bbg":"${{ inputs.bbr_features_override }}","ds":"${{ inputs.misc_features_override }}","ntsync":"${{ inputs.misc_features_override }}","unicode":"${{ inputs.misc_features_override }}","ip_set":"${{ inputs.misc_features_override }}","nomount":"${{ inputs.nomount_override }}","selinux_hide":"${{ inputs.selinux_hide_override }}"}'
+          feature_overrides_json: '{"kpm":"${{ inputs.kpm_override }}","bbr":"${{ inputs.bbr_features_override }}","bbr3":"${{ inputs.bbr_features_override }}","bbg":"${{ inputs.bbr_features_override }}","ds":"${{ inputs.misc_features_override }}","ntsync":"${{ inputs.misc_features_override }}","unicode":"${{ inputs.misc_features_override }}","ip_set":"${{ inputs.misc_features_override }}","nomount":"${{ inputs.nomount_override }}","selinux_hide":"Enable"}'
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 📊 Build statistics
