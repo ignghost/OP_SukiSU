@@ -1,4 +1,4 @@
-name: 'Build OnePlus Kernel with SukiSU'
+name: 'Build OnePlus Kernel with SukiSU Nova'
 
 inputs:
   op_config_json:
@@ -65,7 +65,7 @@ outputs:
     description: 'Full kernel version string'
     value: ${{ steps.save_metadata.outputs.kernel_version }}
   ksu_version:
-    description: 'SukiSU version number'
+    description: 'SukiSU Nova version number'
     value: ${{ steps.save_metadata.outputs.ksu_version }}
   ksu_type:
     description: 'SukiSU Variant'
@@ -139,11 +139,6 @@ runs:
           exit 1
         fi
         for feature in kpm bbr bbr3 bbg ds ntsync unicode ip_set nomount selinux_hide; do
-          if [ "$feature" = "selinux_hide" ]; then
-            echo "OP_SELINUX_HIDE=true" >> "$GITHUB_ENV"
-            echo "SELinux Hide: mandatory (enabled)"
-            continue
-          fi
           value=$(jq -r --arg f "$feature" '.[$f] // "Auto Detect"' <<< "$overrides")
           if [ "$feature" = "kpm" ]; then
             case "$value" in
@@ -939,12 +934,12 @@ runs:
         sed -i 's/protected_modules = \[.*\]/protected_modules = []/' common/modules.bzl || true
         echo "::endgroup::"
 
-    - name: Add SukiSU
+    - name: Add SukiSU Nova
       shell: bash
       if: ${{ inputs.ksu_type == 'SUKISU' }}
       run: |
         set -euo pipefail
-        echo "::group::Add SukiSU"
+        echo "::group::Add SukiSU Nova"
 
         cd "$KERNEL_PLATFORM_FOLDER"
 
@@ -954,7 +949,7 @@ runs:
         echo "Downloading SukiSU setup script..."
         if ! curl --fail --location --proto '=https' --tlsv1.2 -LSs \
           --retry 5 --retry-delay 5 --retry-all-errors \
-          "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
+          "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU-Nova/main/kernel/setup.sh" \
           -o "$SUKISU_SETUP_SCRIPT"; then
           echo "::error::Failed to download SukiSU setup.sh after retries"
           exit 1
@@ -991,22 +986,49 @@ runs:
         cd "$KERNEL_PLATFORM_FOLDER/KernelSU"
 
         KSU_COMMIT_SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
-        COMMITS_COUNT="$(git rev-list --count HEAD 2>/dev/null || true)"
-        if [[ ! "$COMMITS_COUNT" =~ ^[0-9]+$ ]]; then
-          echo "::warning::Could not determine commit count, using fallback 30000."
-          COMMITS_COUNT=30000
+        # Nova defines its kernel version in kernel/Kbuild using:
+        # VERSION_BASE + main-branch commit count - VERSION_OFFSET.
+        # kernel/Makefile does not contain DKSU_VERSION.
+        KSU_KBUILD="$KERNEL_PLATFORM_FOLDER/KernelSU/kernel/Kbuild"
+        if [ ! -f "$KSU_KBUILD" ]; then
+          echo "::error::SukiSU Nova Kbuild is missing: $KSU_KBUILD"
+          exit 1
         fi
 
-        BASE_VERSION=37185
-        KSU_VERSION=$((COMMITS_COUNT + BASE_VERSION))
-
-        echo "SukiSU commits: $COMMITS_COUNT"
-        echo "SukiSU version: $KSU_VERSION"
-        echo "SukiSU commit:  $KSU_COMMIT_SHA"
-
-        if [ -f "$KERNEL_PLATFORM_FOLDER/KernelSU/kernel/Makefile" ]; then
-          sed -i "s/DKSU_VERSION=[0-9]*/DKSU_VERSION=${KSU_VERSION}/" "$KERNEL_PLATFORM_FOLDER/KernelSU/kernel/Makefile" || true
+        VERSION_BASE="$(sed -nE 's/^[[:space:]]*VERSION_BASE[[:space:]]*:?=[[:space:]]*([0-9]+).*$/\1/p' "$KSU_KBUILD" | head -n1)"
+        VERSION_OFFSET="$(sed -nE 's/^[[:space:]]*VERSION_OFFSET[[:space:]]*:?=[[:space:]]*([0-9]+).*$/\1/p' "$KSU_KBUILD" | head -n1)"
+        if [[ ! "$VERSION_BASE" =~ ^[0-9]+$ || ! "$VERSION_OFFSET" =~ ^[0-9]+$ ]]; then
+          echo "::error::Could not read VERSION_BASE/VERSION_OFFSET from $KSU_KBUILD"
+          grep -nE 'VERSION_BASE|VERSION_OFFSET' "$KSU_KBUILD" || true
+          exit 1
         fi
+
+        # Match Nova Kbuild: prefer GitHub's main-branch commit count, then
+        # fall back to the locally cloned main branch when the API is unavailable.
+        GITHUB_COMMITS="$(curl -fsSI --retry 3 --retry-delay 2 \
+          "https://api.github.com/repos/SukiSU-Nova/SukiSU-Nova/commits?sha=main&per_page=1" 2>/dev/null \
+          | tr -d '\r' \
+          | sed -nE 's/.*[?&]page=([0-9]+)>; rel="last".*/\1/ip' \
+          | tail -n1 || true)"
+        if [[ "$GITHUB_COMMITS" =~ ^[0-9]+$ ]]; then
+          NOVA_COMMIT_COUNT="$GITHUB_COMMITS"
+        else
+          NOVA_COMMIT_COUNT="$(git rev-list --count main 2>/dev/null || git rev-list --count origin/main 2>/dev/null || true)"
+        fi
+
+        if [[ ! "$NOVA_COMMIT_COUNT" =~ ^[0-9]+$ ]]; then
+          echo "::error::Could not determine SukiSU Nova main-branch commit count"
+          exit 1
+        fi
+
+        KSU_VERSION="$((VERSION_BASE + NOVA_COMMIT_COUNT - VERSION_OFFSET))"
+        if (( KSU_VERSION <= 0 )); then
+          echo "::error::Calculated invalid SukiSU Nova version: $KSU_VERSION"
+          exit 1
+        fi
+
+        echo "SukiSU Nova version: $KSU_VERSION"
+        echo "SukiSU Nova commit:  $KSU_COMMIT_SHA"
 
         if [ -f "$KERNEL_PLATFORM_FOLDER/KernelSU/kernel/Kbuild" ]; then
           sed -i 's#^KSU_VERSION_FULL :=.*#KSU_VERSION_FULL := v$(VERSION_TAG)-Ghost💀#' "$KERNEL_PLATFORM_FOLDER/KernelSU/kernel/Kbuild" || true
@@ -1049,10 +1071,10 @@ runs:
           echo "$KSU_VERSION"
         } >> "${ARTIFACTS_FOLDER}/${OP_MODEL}_${OP_OS_VERSION}.txt"
 
-        echo "✅ SukiSU added (commit: ${KSU_COMMIT_SHA:0:8})"
+        echo "✅ SukiSU Nova added (commit: ${KSU_COMMIT_SHA:0:8})"
         echo "::endgroup::"
 
-    - name: Apply SUSFS Patches (SukiSU)
+    - name: Apply SUSFS Patches (SukiSU Nova)
       shell: bash
       if: ${{ env.OP_SUSFS == 'true' }}
       env:
@@ -1071,7 +1093,7 @@ runs:
 
     - name: Apply SELinux Modification Hide Script
       shell: bash
-      if: ${{ env.OP_SUSFS == 'true' }}
+      if: ${{ inputs.ksu_type == 'SUKISU' && env.OP_SELINUX_HIDE == 'true' }}
       env:
         ANDROID_VER_LOCAL: ${{ env.ANDROID_VER }}
         KERNEL_VER_LOCAL: ${{ env.KERNEL_VER }}
@@ -1099,12 +1121,12 @@ runs:
         echo "NOMOUNT_APPLIED=true" >> "$GITHUB_ENV"
         echo "::endgroup::"
 
-    - name: Sanitize SukiSU v2.3.0/v2.4.0 compatibility files
+    - name: Sanitize SukiSU Nova v2.3.0/v2.4.0 compatibility files
       shell: bash
       if: ${{ env.OP_SUSFS == 'true' && (env.SUSVER == 'v2.3.0' || env.SUSVER == 'v2.4.0') }}
       run: |
         set -euo pipefail
-        echo "::group::Sanitize SukiSU v2.3.0/v2.4.0 compatibility files"
+        echo "::group::Sanitize SukiSU Nova v2.3.0/v2.4.0 compatibility files"
 
         python3 - <<'PY2'
         from pathlib import Path
@@ -1954,7 +1976,7 @@ runs:
           elif [ -n "${KSU_COMMIT_SHA:-}" ] && [ "$KSU_COMMIT_SHA" != "unknown" ]; then
             mkdir -p "$(dirname "$KERNEL_RUNNER_SRC")"
             curl --fail --location --silent --show-error --retry 3 --retry-delay 2 \
-              "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/$KSU_COMMIT_SHA/kernel/preinit/runner/runner.c" \
+              "https://raw.githubusercontent.com/SukiSU-Nova/SukiSU-Nova/$KSU_COMMIT_SHA/kernel/preinit/runner/runner.c" \
               -o "$KERNEL_RUNNER_SRC"
           else
             echo "::error::Cannot restore runner.c: SukiSU source and commit are unavailable."
@@ -2437,24 +2459,117 @@ runs:
 
         echo "::endgroup::"
 
-    - name: Download latest SukiSU Manager from GitHub Actions
+    - name: Download official SukiSU Nova Manager
       shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        ARTIFACT_DIR="$RUNNER_TEMP/sukisu-manager-artifact"
-        ARTIFACT_ZIP="$RUNNER_TEMP/sukisu-manager-artifact.zip"
-        mkdir -p "$ARTIFACT_DIR"
-        curl --fail --location --retry 3 --retry-delay 2 \
-          "https://nightly.link/SukiSU-Ultra/SukiSU-Ultra/workflows/build-manager/main/Manager.zip" \
-          --output "$ARTIFACT_ZIP"
-        unzip -q "$ARTIFACT_ZIP" -d "$ARTIFACT_DIR"
-        APK_PATH=$(find "$ARTIFACT_DIR" -type f -name '*.apk' ! -name '*androidTest*' | head -n 1)
-        if [ -z "$APK_PATH" ] || [ ! -s "$APK_PATH" ]; then
-          echo "::error::No APK found in the latest SukiSU Manager GitHub Actions artifact"
+
+        # Resolve the rolling manager-ci APK. Prefer the authenticated API to
+        # avoid GitHub's unauthenticated shared-runner rate limits; fall back
+        # to GitHub's release-assets HTML endpoint if the API is blocked.
+        MANAGER_REPO="SukiSU-Nova/SukiSU-Nova"
+        RELEASE_JSON="$RUNNER_TEMP/sukisu-nova-manager-release.json"
+        ASSET_HTML="$RUNNER_TEMP/sukisu-nova-manager-assets.html"
+        APK_PATH="$RUNNER_TEMP/sukisu-nova-manager-arm64.apk"
+        API_URL="https://api.github.com/repos/${MANAGER_REPO}/releases/tags/manager-ci"
+        ASSET_PAGE="https://github.com/${MANAGER_REPO}/releases/expanded_assets/manager-ci"
+        CURL_AUTH=()
+        if [ -n "${GH_TOKEN:-}" ]; then
+          CURL_AUTH=(-H "Authorization: Bearer ${GH_TOKEN}")
+        fi
+
+        APK_URL=""
+        echo "Resolving official SukiSU Nova Manager from manager-ci"
+        if curl --silent --show-error --fail --location --retry 2 --retry-delay 2 \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "${CURL_AUTH[@]}" \
+          "$API_URL" --output "$RELEASE_JSON"; then
+          APK_URL="$(python3 - "$RELEASE_JSON" <<'PYJSON'
+        import json
+        import sys
+
+        with open(sys.argv[1], encoding="utf-8") as stream:
+            release = json.load(stream)
+
+        matches = [
+            asset.get("browser_download_url", "")
+            for asset in release.get("assets", [])
+            if asset.get("name", "").startswith("SukiSU_Nova_")
+            and "arm64-v8a" in asset.get("name", "")
+            and asset.get("name", "").endswith("-release.apk")
+        ]
+        if len(matches) == 1 and matches[0]:
+            print(matches[0])
+        PYJSON
+          )"
+        fi
+
+        # GitHub's HTML asset listing does not consume the REST API rate limit.
+        if [ -z "$APK_URL" ]; then
+          echo "GitHub API unavailable or rate-limited; resolving APK from release page"
+          curl --silent --show-error --fail --location --retry 3 --retry-delay 2 \
+            -H "Accept: text/html" \
+            "$ASSET_PAGE" --output "$ASSET_HTML"
+          APK_URL="$(python3 - "$ASSET_HTML" <<'PYHTML'
+        import html
+        import re
+        import sys
+
+        page = open(sys.argv[1], encoding="utf-8").read()
+        page = html.unescape(page)
+        pattern = re.compile(
+            r'href="(/SukiSU-Nova/SukiSU-Nova/releases/download/manager-ci/'
+            r'SukiSU_Nova_[^"?]*arm64-v8a[^"?]*-release\.apk)"'
+        )
+        matches = sorted(set(pattern.findall(page)))
+        if len(matches) != 1:
+            raise SystemExit(
+                "Expected exactly one SukiSU Nova arm64-v8a release APK; "
+                f"found {len(matches)}"
+            )
+        print("https://github.com" + matches[0])
+        PYHTML
+          )"
+        fi
+
+        if [[ "$APK_URL" != https://github.com/SukiSU-Nova/SukiSU-Nova/releases/download/manager-ci/SukiSU_Nova_*arm64-v8a*-release.apk ]]; then
+          echo "::error::Could not resolve a valid official SukiSU Nova arm64 Manager APK URL"
           exit 1
         fi
-        cp "$APK_PATH" "$AK3_FOLDER/SukiSU-Manager-latest.apk"
-        echo "Included SukiSU Manager APK from the latest GitHub Actions artifact: $APK_PATH"
+
+        curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
+          "$APK_URL" --output "$APK_PATH"
+
+        if [ ! -s "$APK_PATH" ] || ! unzip -tq "$APK_PATH" >/dev/null 2>&1; then
+          echo "::error::Downloaded SukiSU Nova Manager is missing or not a valid APK"
+          exit 1
+        fi
+
+        # Verify the APK package identity, not merely its filename.
+        AAPT="$(command -v aapt || true)"
+        if [ -z "$AAPT" ] && [ -n "${ANDROID_HOME:-}" ]; then
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt 2>/dev/null | sort -V | tail -n1)"
+        fi
+        if [ -n "$AAPT" ]; then
+          BADGING="$("$AAPT" dump badging "$APK_PATH")"
+          if ! grep -q "^package: name='com\.sukisu\.nova'" <<< "$BADGING"; then
+            echo "::error::Downloaded APK does not have the SukiSU Nova package ID com.sukisu.nova"
+            exit 1
+          fi
+          if ! grep -q "^application-label:'SukiSU Nova'" <<< "$BADGING"; then
+            echo "::error::Downloaded APK does not identify itself as SukiSU Nova"
+            exit 1
+          fi
+        else
+          echo "::warning::aapt unavailable; verified official Nova release asset name and APK archive only"
+        fi
+
+        mkdir -p "$AK3_FOLDER"
+        cp -f "$APK_PATH" "$AK3_FOLDER/SukiSU-Nova-Manager-latest.apk"
+        echo "Included official SukiSU Nova Manager: $(basename "$APK_URL")"
 
     - name: Create Kernel ZIP
       id: create_zip
@@ -2543,8 +2658,8 @@ runs:
           echo "Kernel Uname: ${{ env.KERNEL_UNAME }}"
           echo "Build User: ${{ env.BUILD_USER }}"
           echo "Build Host: ${{ env.BUILD_HOST }}"
-          echo "SukiSU Version: ${KSUVER:-unknown}"
-          echo "SukiSU commit SHA: ${KSU_SHA:-unknown}"
+          echo "SukiSU Nova Version: ${KSUVER:-unknown}"
+          echo "SukiSU Nova commit SHA: ${KSU_SHA:-unknown}"
           if [ "${{ env.OP_SUSFS }}" = true ]; then
             echo "SUSFS Version: ${SUSVER:-unknown}"
             echo "SUSFS commit SHA: $SUSFS_SHA"
@@ -2579,7 +2694,7 @@ runs:
         } | tee summary.txt
         
         SUM_HEAD="🎯 <b>${{ env.OP_MODEL }}</b> — ${{ steps.save_metadata.outputs.kernel_version }}"
-        SUM_HEAD="${SUM_HEAD} · ⚡SukiSU ${KSUVER:-?}"
+        SUM_HEAD="${SUM_HEAD} · ⚡SukiSU Nova ${KSUVER:-?}"
         if [ "${{ env.OP_SUSFS }}" = true ]; then SUM_HEAD="${SUM_HEAD} · SUSFS ${SUSVER:-?}"; fi
         SUM_HEAD="${SUM_HEAD} · ⏱ ${{ steps.collect_stats.outputs.build_time }}s"
         if [ "${{ steps.collect_stats.outputs.warnings_count }}" != "0" ]; then
@@ -2600,12 +2715,12 @@ runs:
           echo "| **Kernel Uname** | \`${{ env.KERNEL_UNAME }}\` |"
           echo "| **Build User** | ${{ env.BUILD_USER }} |"
           echo "| **Build Host** | ${{ env.BUILD_HOST }} |"
-          echo "| **SukiSU Version** | ${KSUVER:-unknown} |"
+          echo "| **SukiSU Nova Version** | ${KSUVER:-unknown} |"
           
           if [ "$KSU_SHA" != "unknown" ]; then
-            echo "| **SukiSU Commit** | [\`${KSU_SHA:0:8}\`](https://github.com/SukiSU-Ultra/SukiSU-Ultra/commit/$KSU_SHA) |"
+            echo "| **SukiSU Nova Commit** | [\`${KSU_SHA:0:8}\`](https://github.com/SukiSU-Nova/SukiSU-Nova/commit/$KSU_SHA) |"
           else
-            echo "| **SukiSU Commit** | unknown |"
+            echo "| **SukiSU Nova Commit** | unknown |"
           fi
           
           if [ "${{ env.OP_SUSFS }}" = true ]; then
