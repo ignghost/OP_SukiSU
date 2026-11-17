@@ -67,6 +67,12 @@ on:
         type: choice
         options: [Enable, Disable]
         default: Enable
+      selinux_hide_override:
+        description: 'SELinux Hide Implementation (Enable For Build Success)'
+        required: true
+        type: choice
+        options: [Enable, Disable]
+        default: Enable
 
       bbr_features_override:
         description: 'BBR + BBRv3 + BBG'
@@ -169,10 +175,11 @@ jobs:
             --arg bbr_features '${{ inputs.bbr_features_override }}' \
             --arg misc_features '${{ inputs.misc_features_override }}' \
             --arg nomount '${{ inputs.nomount_override }}' \
+            --arg selinux_hide '${{ inputs.selinux_hide_override }}' \
             'def v: if . == "Auto Detect" then "config" elif . == "Enable" then "enable" elif . == "Disable" then "disable" else . end;
              {kpm:$kpm,bbr:($bbr_features|v),bbr3:($bbr_features|v),bbg:($bbr_features|v),
               ds:$misc_features,ntsync:$misc_features,unicode:$misc_features,ip_set:$misc_features,
-              nomount:$nomount,selinux_hide:"Enable"}')
+              nomount:$nomount,selinux_hide:$selinux_hide}')
           echo "Feature overrides: $feature_overrides"
           if ! ksu_options_normalized=$(echo "$ksu_options_raw" | jq -c 'map(if .type then .type |= ascii_upcase | if .hash == null then .hash = "v4.1.3" else . end else error("No type found") end)' 2>&1); then
             echo "::error::ksu_options validation failed: $ksu_options_normalized"
@@ -265,8 +272,8 @@ jobs:
           ksu_type=$(echo "$ksu_options_normalized" | jq -r '.[0].type')
           ksu_ref=$(echo "$ksu_options_normalized" | jq -r '.[0].hash')
           
-          KSU_REPO_OWNER="SukiSU-Ultra"
-          KSU_REPO_NAME="SukiSU-Ultra"
+          KSU_REPO_OWNER="SukiSU-Nova"
+          KSU_REPO_NAME="SukiSU-Nova"
           
           HEAD_REF="refs/heads/${ksu_ref}"
           TAG_REF="refs/tags/${ksu_ref}"
@@ -517,7 +524,7 @@ jobs:
             echo "| 🧩 KPM Support | **${{ inputs.kpm_override }}** |"
             echo "| 🧩 Droidspaces + NTSync + Unicode + IP SET/IPv6_NAT | **${{ inputs.misc_features_override }}** |"
             echo "| 🧱 NoMount Implementation | **${{ inputs.nomount_override }}** |"
-            echo "| 🛡️ SELinux Modification Hide | **Mandatory (automatic)** |"
+            echo "| 🛡️ SELinux Modification Hide | **${{ inputs.selinux_hide_override }}** |"
             echo "| 🧹 Clean build (no ccache) | ${{ inputs.clean_build && '✅' || '❌' }} |"
             echo "| 📦 Create release | ${{ inputs.make_release && '✅' || '❌' }} |"
             echo "| 🔄 Toolchain sync | ${{ (inputs.mirror_toolchains || inputs.make_release) && '✅' || '❌' }}${{ (!inputs.mirror_toolchains && inputs.make_release) && ' · auto for release' || '' }} |"
@@ -755,7 +762,7 @@ jobs:
           enable_adios: ${{ inputs.enable_adios }}
           clean: ${{ inputs.clean_build }}
           debug: ${{ inputs.debug }}
-          feature_overrides_json: '{"kpm":"${{ inputs.kpm_override }}","bbr":"${{ inputs.bbr_features_override }}","bbr3":"${{ inputs.bbr_features_override }}","bbg":"${{ inputs.bbr_features_override }}","ds":"${{ inputs.misc_features_override }}","ntsync":"${{ inputs.misc_features_override }}","unicode":"${{ inputs.misc_features_override }}","ip_set":"${{ inputs.misc_features_override }}","nomount":"${{ inputs.nomount_override }}","selinux_hide":"Enable"}'
+          feature_overrides_json: '{"kpm":"${{ inputs.kpm_override }}","bbr":"${{ inputs.bbr_features_override }}","bbr3":"${{ inputs.bbr_features_override }}","bbg":"${{ inputs.bbr_features_override }}","ds":"${{ inputs.misc_features_override }}","ntsync":"${{ inputs.misc_features_override }}","unicode":"${{ inputs.misc_features_override }}","ip_set":"${{ inputs.misc_features_override }}","nomount":"${{ inputs.nomount_override }}","selinux_hide":"${{ inputs.selinux_hide_override }}"}'
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 📊 Build statistics
@@ -825,7 +832,7 @@ jobs:
           | **Kernel** | ${{ steps.build.outputs.kernel_version }} |
           EOF
             cat >> $GITHUB_STEP_SUMMARY << EOF
-          | **SukiSU** | v${{ steps.build.outputs.ksu_version }} |
+          | **SukiSU Nova** | v${{ steps.build.outputs.ksu_version }} |
           EOF
             
             if [ "${{ matrix.susfs }}" = true ]; then
@@ -1227,8 +1234,8 @@ jobs:
           
           ksu_display=$(ksu_display_value "$ksu_ref" "$ksu_resolved_hash")
           cat << EOF >> release_notes.md
-          | **SukiSU Branch** | \`$ksu_display\` |
-          | **SukiSU Version** | \`$ksu_ver_global\` |
+          | **SukiSU Nova Branch** | \`$ksu_display\` |
+          | **SukiSU Nova Version** | \`$ksu_ver_global\` |
           EOF
           cat << EOF >> release_notes.md
           | **SUSFS Version** | \`$SUSFS_BASE_VERSION\` |
@@ -1252,7 +1259,7 @@ jobs:
           
           EOF
           cat << EOF >> release_notes.md
-          - **SukiSU** - Kernel-level root solution
+          - **SukiSU Nova** - Kernel-level root solution
           EOF
           cat << EOF >> release_notes.md
           - **SUSFS $SUSFS_BASE_VERSION** - Advanced hiding and security features
@@ -1305,8 +1312,8 @@ jobs:
           
           EOF
           cat << EOF >> release_notes.md
-          - **SukiSU Manager** *(install the version matching the kernel — see \`SukiSU Version\` in Build Configuration above)*
-            → [GitHub Release](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
+          - **SukiSU Nova Manager** *(install the version matching the kernel — see \`SukiSU Nova Version\` in Build Configuration above)*
+            → [GitHub Release](https://github.com/SukiSU-Nova/SukiSU-Nova/releases)
           EOF
           cat << EOF >> release_notes.md
           - **WildKSU Manager** (Recommended for additional features)  
@@ -1332,7 +1339,7 @@ jobs:
               c. **KSU GKI**: if you are 100% sure you already flashed stock init_boot/boot/vendor_boot, no action is needed; otherwise, follow the same steps as KSU LKM.
               d. **APatch**: remove /data/adb contents to avoid leftover root conflicts **after flashing the AnyKernel3 ZIP**.
           3. Flash the ZIP to the active slot using Kernel Flasher.
-          4. Install the SukiSU Manager APK, same version as mentioned in the AnyKernel3 ZIP name.
+          4. Install the SukiSU Nova Manager APK, same version as mentioned in the AnyKernel3 ZIP name.
           5. Open the SukiSU app.
           6. Reboot the device if you performed any cleanup in step 2.
           
